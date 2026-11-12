@@ -1,0 +1,91 @@
+# Prism17 configuration
+# All paths are resolved relative to this file's directory unless absolute.
+
+project:
+  name: Prism17
+  version: 0.1.0
+  # Assessment scope: disclosure quality, not real-world performance.
+  assessment_scope: disclosure
+
+paths:
+  data_dir: data
+  reports_dir: data/reports
+  gold_dir: data/gold
+  cache_dir: .cache/prism17
+  output_dir: outputs
+
+parsing:
+  min_passage_words: 50
+  max_passage_words: 250
+  # A page with fewer than this many extractable characters and no tables
+  # is reported as unreadable (for example, a scanned page without OCR).
+  unreadable_char_threshold: 20
+  extract_tables: true
+  table_min_rows: 2
+  table_min_cols: 2
+
+retrieval:
+  embedding_model: BAAI/bge-small-en-v1.5
+  top_k: 3
+  # Cosine-similarity threshold. Candidates below this are discarded.
+  score_threshold: 0.35
+  batch_size: 32
+  # BGE models benefit from a query instruction. Passages are queries here;
+  # SDG targets are the documents. Set to "" to disable.
+  query_prefix: "Represent this sentence for searching relevant passages: "
+  cache_dir: .cache/prism17/embeddings
+
+llm:
+  provider: ollama
+  # Supported local models for comparison: qwen2.5:7b-instruct,
+  # llama3.1:8b, gemma2:9b. The default is the recommended one.
+  model: qwen2.5:7b-instruct
+  base_url: http://localhost:11434
+  temperature: 0
+  num_ctx: 4096
+  request_timeout_seconds: 300
+  retries: 1
+  max_predict_tokens: 600
+  # Optional safety limit for very long reports. Null means no limit.
+  max_candidates: 180
+  cache_dir: .cache/prism17/llm
+
+verification:
+  # Stage 1: quote existence.
+  fuzzy_threshold: 95
+  # Stage 2: semantic support. One of: nli, llm.
+  # Off by default so a first CPU run does not download the NLI model. Enable
+  # with `--semantic` on the pipeline or set this to true.
+  semantic_enabled: false
+  semantic_method: nli
+  nli_model: cross-encoder/nli-deberta-v3-small
+  nli_supported_threshold: 0.60
+  nli_uncertain_threshold: 0.35
+
+rubric:
+  # Deterministic level rules are documented in README.md and implemented
+  # in prism17/rubric.py. Do not change these without updating the tests.
+  levels: [1, 2, 3, 4]
+
+report:
+  focus_sdgs: [8, 12, 13, 17]
+  include_unscored: true
+  company_name: null
+  report_title: SDG Alignment Report
+
+tracking:
+  # Narrow multi-year tracking compares quantified (L3/L4 by default) findings.
+  min_level: 3
+  require_same_unit: true
+
+compare:
+  # High-specificity threshold. Keep high_level_label in step with min_level;
+  # a --min-level override renders its own L<n>+ label.
+  min_level: 3
+  high_level_label: "L3+"
+
+evaluation:
+  gold_dir: data/gold
+  results_csv: eval/results.csv
+  # Optional; install codecarbon to enable energy estimates.
+  estimate_energy: false

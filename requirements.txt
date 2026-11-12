@@ -1,0 +1,28 @@
+# Prism17 - open-source, CPU-first dependencies.
+# Python 3.11+ is required. No paid or proprietary AI APIs are used.
+
+# Parsing
+PyMuPDF>=1.24,<2
+pdfplumber>=0.11,<1
+
+# Configuration and data
+PyYAML>=6.0,<7
+pandas>=2.2,<3
+numpy>=1.26,<3
+
+# Retrieval (CPU)
+sentence-transformers>=3.0,<6
+faiss-cpu>=1.8,<2
+
+# Local LLM and verification
+ollama>=0.4,<1
+rapidfuzz>=3.9,<4
+
+# UI and reporting
+streamlit>=1.38,<2
+Jinja2>=3.1,<4
+
+# Tests and evaluation
+pytest>=8,<9
+# Optional energy estimate for evaluation runs.
+codecarbon>=2.7,<4

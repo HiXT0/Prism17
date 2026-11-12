@@ -1,0 +1,26 @@
+Few-shot examples. Keep these in sync with any schema change.
+
+Example 1
+Candidate target: 13.2 - Integrate climate change measures into national
+policies, strategies and planning.
+Passage: "In FY2024 we integrated climate-risk assessment into capital planning
+and set a 2030 target to reduce Scope 1 and Scope 2 emissions by 42% against a
+FY2020 baseline of 100,000 tCO2e; we have achieved a 12% reduction to date."
+Output:
+{"relevant":true,"sdg_goal":13,"sdg_target":"13.2","claim":"The company integrated climate-risk assessment into capital planning and set a 2030 emissions reduction target against a FY2020 baseline, with a 12% reduction achieved so far.","supporting_quote":"In FY2024 we integrated climate-risk assessment into capital planning and set a 2030 target to reduce Scope 1 and Scope 2 emissions by 42% against a FY2020 baseline of 100,000 tCO2e; we have achieved a 12% reduction to date.","dimensions":{"specificity":true,"measurable_indicator":true,"deadline":true,"baseline":true,"reported_progress":true},"extracted":{"value":"42","unit":"%","year":"2030","status":"ongoing","negated":false},"confidence":0.92}
+
+Example 2
+Candidate target: 7.2 - Increase substantially the share of renewable energy
+in the global energy mix.
+Passage: "We have appointed an energy manager and are expanding our rooftop
+solar programme across manufacturing sites."
+Output:
+{"relevant":true,"sdg_goal":7,"sdg_target":"7.2","claim":"The company has appointed an energy manager and is expanding rooftop solar across manufacturing sites.","supporting_quote":"We have appointed an energy manager and are expanding our rooftop solar programme across manufacturing sites.","dimensions":{"specificity":true,"measurable_indicator":false,"deadline":false,"baseline":false,"reported_progress":false},"extracted":{"value":"","unit":"","year":"","status":"ongoing","negated":false},"confidence":0.78}
+
+Example 3
+Candidate target: 13.2 - Integrate climate change measures into national
+policies, strategies and planning.
+Passage: "The company conducted fire-safety drills at all manufacturing sites
+during the year and provided first-aid training to contractors."
+Output:
+{"relevant":false,"sdg_goal":13,"sdg_target":"13.2","claim":"","supporting_quote":"","dimensions":{"specificity":false,"measurable_indicator":false,"deadline":false,"baseline":false,"reported_progress":false},"extracted":{"value":"","unit":"","year":"","status":"unclear","negated":false},"confidence":0.88}

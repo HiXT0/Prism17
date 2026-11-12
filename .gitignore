@@ -1,0 +1,9 @@
+﻿.venv/
+__pycache__/
+.cache/
+outputs/
+data/osdg/
+data/reports/
+*.pdf
+.pytest_cache/
+.ruff_cache/
