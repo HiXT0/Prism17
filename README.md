@@ -249,13 +249,13 @@ python -m pytest -q
 
 AI coding and research assistants were used during the development of this project, as permitted by the hackathon rules. The team is responsible for the submitted work and will be able to explain it during evaluation.
 
-*[A detailed disclosure (which tools were used, for which parts, and what the team wrote, reviewed and verified) will be added here before final submission.]*
+Claude, Gemini, Chatgpt has been used for research and literature review after that a manual google scholor search has been done and validated the work. FOr small code snippets and function writting clause code and opencode has been used.
 
 Separately, Prism17 itself uses open-weight language models at runtime, as described in Section 6.
 
 ## 15. Team and acknowledgements
 
-**Team:** *[names, roles, institution]*
+**Team:** *Prateek Kumar & Pritam Bhakta (Student), Dr Pushan Kumar Dutta (Faculty Guide and Researcher), Amity University Kolkata*
 
 **Acknowledgements:** UN Statistics Division (SDG framework), the OSDG project and its community (OSDG Community Dataset), and the open-source authors of Ollama, PyMuPDF, pdfplumber, sentence-transformers, FAISS, rapidfuzz, Streamlit, Jinja2, pandas and scikit-learn. Model weights (Qwen, Llama, Gemma) are used under their respective licences.
 
