@@ -1,566 +1,291 @@
-# Prism17
+# Prism17: Evidence-Grounded SDG Disclosure Auditor
 
-**Evidence-grounded SDG disclosure auditing.** Prism17 reads a corporate
-sustainability report, BRSR filing, or annual report and produces an SDG
-Alignment Report in which every finding is tied to a verified quote and page
-number.
+**THREWS ODYSSEY 2026 | Track: ClimateTech & Sustainability**
 
-> Prism17 assesses **disclosure quality**, not real-world sustainability
-> performance. It is decision support: a human reviewer must confirm or override
-> every finding before it is used.
+> **Status: working prototype, evaluation in progress.** The full pipeline, review interface, multi-year tracking, cross-company comparison and benchmark tooling are built and unit-tested. Evaluation on a human-labelled benchmark has not been run yet. **Nothing in this README reports a measured accuracy result, because none exists yet.**
 
-## Status
+Prism17 reads corporate sustainability disclosures (BRSR filings, sustainability reports, annual reports) and produces an **SDG Alignment Report**, similar to a similarity report attached to a document. It maps passages to the UN Sustainable Development Goals and their targets, grades how concrete each commitment is, and ties every finding to a **verified quote and page number**.
 
-Phases 1-4 are implemented and tested: parsing, dense retrieval over the UN SDG
-targets, a strict-JSON local Ollama judge, stage 1 quote verification, a
-deterministic L1-L4 rubric, the CLI pipeline, Markdown/HTML reports, and a local
-Streamlit review UI.
+---
 
-Phase 5 adds two things. First, **Stage 2 semantic verification** checks whether
-a verified quote supports the claim attributed to it. It combines a deterministic
-consistency guard with an optional local NLI cross-encoder or local Ollama check.
-It is **disabled by default** so a first CPU run does not download another model.
-Second, evaluation helpers and annotation tooling cover binary metrics, Cohen's
-kappa, quadratic weighted kappa, rubric agreement, and a gold-annotation
-template/scorer. **No human gold annotations or measured benchmark results are
-bundled.** Do not report benchmark numbers until real annotations exist.
+## Table of contents
+1. [Project details](#1-project-details)
+2. [Problem statement](#2-problem-statement)
+3. [Proposed solution and key features](#3-proposed-solution-and-key-features)
+4. [How it differs from existing approaches](#4-how-it-differs-from-existing-approaches)
+5. [Technical plan and data flow](#5-technical-plan-and-data-flow)
+6. [Technology stack](#6-technology-stack)
+7. [SDGs targeted and impact](#7-sdgs-targeted-and-impact)
+8. [Implementation overview](#8-implementation-overview)
+9. [Datasets and external resources](#9-datasets-and-external-resources)
+10. [Evaluation plan and results](#10-evaluation-plan-and-results)
+11. [Progress and roadmap](#11-progress-and-roadmap)
+12. [Running the project](#12-running-the-project)
+13. [Responsible use and limitations](#13-responsible-use-and-limitations)
+14. [AI assistance disclosure](#14-ai-assistance-disclosure)
+15. [Team and acknowledgements](#15-team-and-acknowledgements)
 
-Phase 6 adds an evidence coverage matrix, narrow multi-year tracking of
-quantified targets, and a descriptive cross-company comparison. Tracking and
-comparison report disclosure only; they do not establish real-world performance,
-and the comparison is not a ranking.
+---
 
-Phase 2 is deliberately conservative: a finding is scored only when its quote is
-verified against the source page, Stage 2 does not veto it, and the rubric can
-assign a level. Malformed model output and unverifiable quotes are retained as
-"needs review", not silently dropped. Phase 2 has been verified end to end with
-the real local model; see "Phase 2 verification on the sample report" below.
+## 1. Project details
 
-### Roadmap
+| | |
+|---|---|
+| **Project name** | Prism17 |
+| **Tagline** | Every SDG finding traced to a verified quote |
+| **Hackathon** | THREWS ODYSSEY 2026 (Threws, The Research World) |
+| **Track** | ClimateTech & Sustainability |
+| **Theme fit** | Corporate sustainability reporting, ESG transparency and accountability |
+| **Focus SDGs** | 8, 12, 13, 17 (all 17 supported in the tool) |
+| **Status** | Working prototype, evaluation in progress |
+| **Repository** | <https://github.com/HiXT0/Prism17> |
+| **Demo** | Coming soon |
+| **Demo video** | Coming soon |
 
-- [x] Parse reports into pages, passages, and tables.
-- [x] Retrieve SDG targets and judge candidate passages locally.
-- [x] Verify quote existence (Stage 1) and apply the deterministic rubric.
-- [x] Render coverage reports and review findings in the Streamlit UI.
-- [x] Add Stage 2 semantic support checking (optional, disabled by default).
-- [x] Add the five-dimension evidence coverage matrix.
-- [x] Add narrow multi-year tracking for quantified targets.
-- [x] Add descriptive cross-company comparison.
-- [x] Add evaluation metrics, annotation templates, and annotation guidelines.
-- [ ] Collect independent human gold annotations and report measured benchmark
-      metrics.
-- [ ] Validate Stage 2 semantic verification end to end on the bundled sample
-      with the NLI model enabled.
+## 2. Problem statement
 
-## Requirements
+Companies publish sustainability disclosures that run to hundreds of pages. SDG-related claims are scattered across narrative text and data tables, vary widely in specificity, and are hard to compare across companies or years. In India, BRSR filings are mandatory for the top listed companies, yet they are still difficult to screen at scale.
 
-- Python 3.11 or newer
-- A local [Ollama](https://ollama.com/) installation (needed from Phase 2)
-- No GPU required
+Existing SDG classifiers label text with goals. They do not answer what stakeholders actually ask:
 
-The Stage 2 NLI check uses the installed `sentence-transformers` package and
-downloads `cross-encoder/nli-deberta-v3-small` on first use. It is optional and
-disabled by default.
+- **How concrete is this commitment?** Is there a measurable indicator, a deadline, a baseline, reported progress?
+- **Is the cited evidence real,** and does it support the claim being made?
+- **How did a target change** between reporting years?
 
-## Setup (Windows PowerShell)
+Investors, regulators, journalists and NGOs end up either reading manually or trusting automated output they cannot verify.
 
-```powershell
-cd prism17
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+## 3. Proposed solution and key features
+
+Prism17 takes a report PDF and returns an auditable report.
+
+1. **Verified evidence.** Every quote is matched against the parsed source page, and quotes that cannot be found are discarded. A second check (Stage 2, off by default) tests whether the quote supports the claim, preserving negation, year, units and commitment status. Findings judged "not supported" or "uncertain" are left unscored.
+2. **Rubric-based Commitment Quality Score.** Five dimensions are checked: specificity, measurable indicator, deadline, baseline and reported progress. A fixed rule then derives a level:
+
+   | Level | Meaning |
+   |---|---|
+   | L1 | Aspiration only (no measurable indicator, deadline or baseline) |
+   | L2 | Concrete action, but not fully quantified |
+   | L3 | Quantified target with indicator, baseline and deadline |
+   | L4 | L3 plus reported progress against the target |
+
+   The level is derived by deterministic code, not by an LLM's opinion, so it is reproducible and unit-tested.
+3. **Evidence Coverage Matrix.** For each SDG target or claim, shows which rubric dimensions are present, absent or not assessable, with neutral flags such as "disclosure gap" and "low specificity". Included in the Markdown report, HTML report and UI.
+4. **Improvement guidance.** For each finding below L4, states what a disclosure would need to add to reach the next level.
+5. **Multi-year tracking (narrow scope).** For quantified targets only (L3 and above by default, configurable with `--min-level`), reports progressing, unchanged, changed or not comparable (when baselines or units differ). Units are compared conservatively: kilotonnes are not collapsed into tonnes, and multipliers such as "million" are respected. It never concludes that a target was "discontinued", only "not found in later report (needs review)".
+6. **Cross-company comparison.** A descriptive view of disclosure quality for a chosen SDG, with a configurable high-level threshold. It is not a ranking.
+7. **Human oversight.** Low-confidence findings are left unscored, and a reviewer can accept or override any finding in the UI.
+8. **Benchmark tooling.** Scripts generate an annotation template for human reviewers and score their labels against the model, reporting agreement and Cohen's kappa. With blank or invalid labels they report an explicit status and null metrics rather than placeholder numbers.
+
+## 4. How it differs from existing approaches
+
+SDG text classifiers (for example those trained on the OSDG Community Dataset) assign goal labels to text. Prism17 is intended to add:
+
+- evidence that is verified against the source page, with a support check,
+- commitment quality graded by transparent rules over five dimensions,
+- disclosure gaps and multi-year changes reported in neutral language, and
+- a design that runs entirely on local open models.
+
+*A related-work comparison with citations will be added as the evaluation completes.*
+
+## 5. Technical plan and data flow
+
+```mermaid
+flowchart TD
+    A[Report PDF] --> B[Parse: page-tagged passages + tables]
+    B --> C[Retrieve: embed passages, match to SDG targets]
+    C --> D[Judge: local LLM returns structured JSON]
+    D --> E{Verify stage 1: quote exists on cited page?}
+    E -- No --> X[Discard and log as hallucinated quote]
+    E -- Yes --> F{Verify stage 2: quote supports claim?}
+    F -- Not supported / uncertain --> R[Needs human review, unscored]
+    F -- Supported --> G[Rubric engine: derive L1-L4 deterministically]
+    G --> H[Coverage matrix + gap flags + guidance]
+    H --> I[HTML report + Streamlit UI]
+    I --> J[Human review: accept / override]
+    H --> K[Multi-year tracking]
+    H --> L[Cross-company comparison]
 ```
 
-On macOS/Linux:
+**Stage by stage**
 
-```bash
-cd prism17
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+1. **Parse.** Text is extracted per page, split into passages (about 50 to 250 words) with page number and section heading, and tables are extracted separately. Unreadable pages are logged and reported, never silently skipped.
+2. **Retrieve.** SDG target texts and passages are embedded, and the top candidate targets per passage above a tuned score threshold are kept.
+3. **Judge.** A local LLM returns strict JSON: claim, exact supporting quote, the five rubric dimensions, extracted value, unit, year, status, negation flag and confidence. Malformed output is retried once, then marked for human review. Calls are cached.
+4. **Verify.** Stage 1 string-matches the quote on the cited page. Stage 2 checks semantic support with a deterministic consistency guard plus an optional NLI or LLM check.
+5. **Score.** Levels are derived by fixed rules (see [Section 3](#3-proposed-solution-and-key-features)).
+6. **Report.** Coverage matrix, gap flags, guidance and a self-contained HTML report with highlighted evidence and page links.
+7. **Track and compare.** Quantified targets are matched across years, and companies are compared per SDG.
+
+## 6. Technology stack
+
+| Layer | Tools |
+|---|---|
+| Language | Python 3.11+ |
+| PDF parsing | PyMuPDF (page text), pdfplumber (tables) |
+| Retrieval | sentence-transformers (BAAI/bge-small-en-v1.5), FAISS (CPU) |
+| LLM judgement | Ollama running open-weight models locally (default Qwen 2.5 7B Instruct; Llama 3.1 8B and Gemma 2 9B for comparison) |
+| Verification | rapidfuzz string matching, plus an NLI or LLM entailment check |
+| Rubric engine | Deterministic rules |
+| Reports and UI | Jinja2 (HTML reports), Streamlit |
+| Evaluation | pandas, scikit-learn metrics, Cohen's kappa, pytest, codecarbon (energy estimate) |
+
+**Design principle:** everything runs locally on a laptop with no GPU and no paid or proprietary AI APIs. Reports never leave the user's machine, and the tool's own footprint stays small.
+
+## 7. SDGs targeted and impact
+
+Prism17 supports accountability and transparency in corporate reporting. It does not itself change company behaviour, and its contribution is making disclosures comparable, checkable and easier to improve.
+
+| SDG | How Prism17 relates |
+|---|---|
+| **SDG 12** Responsible Consumption and Production | Makes sustainable-practice and reporting commitments (including target 12.6 on corporate sustainability reporting) easier to screen and compare |
+| **SDG 13** Climate Action | Grades the specificity of climate targets (emissions, baselines, deadlines, progress) |
+| **SDG 8** Decent Work and Economic Growth | Surfaces workforce and labour-related disclosures and their specificity |
+| **SDG 17** Partnerships for the Goals | Supports data and accountability partnerships by producing open, auditable, comparable outputs |
+
+**Who benefits:** investors and analysts screening reports, regulators checking disclosure quality, journalists and NGOs needing traceable evidence, and companies wanting concrete guidance on strengthening their reporting.
+
+**Scalability:** more report types and languages can be added, and the local small-model design keeps cost and energy use low.
+
+## 8. Implementation overview
+
 ```
-
-Install Ollama separately, then pull the default model:
-
-```bash
-ollama pull qwen2.5:7b-instruct
-```
-
-Optional comparison models:
-
-```bash
-ollama pull llama3.1:8b
-ollama pull gemma2:9b
-```
-
-## Project layout
-
-```text
 prism17/
-  config.yaml
-  data/
-    sdg_targets.json
-    reports/
-    gold/
-      ANNOTATION_GUIDELINES.md
-  docs/
-    RUBRIC.md
   prism17/
-    config.py
-    parse.py
-    models.py
-    retrieve.py
-    judge.py
-    verify.py
-    semantic.py
-    rubric.py
-    coverage.py
-    guidance.py
-    report.py
-    review.py
-    tracking.py
-    compare.py
-    benchmark.py
-    evaluation.py
-    ui.py
-    pipeline.py
-  eval/
-    osdg_check.py
-    make_gold_template.py
-    score_benchmark.py
-  app.py
-  prompts/
-    judge_system.txt
-    judge_examples.txt
-  tests/
-  outputs/
+    parse.py        PDF -> page-tagged passages
+    retrieve.py     embeddings + FAISS target matching
+    judge.py        LLM rubric extraction (structured JSON)
+    verify.py       quote verification (stage 1)
+    semantic.py     semantic-support check (stage 2)
+    rubric.py       deterministic L1-L4 derivation
+    coverage.py     evidence coverage matrix + gap flags
+    guidance.py     "what to add to reach the next level"
+    review.py       human-review decisions
+    report.py       Markdown and HTML report generation
+    tracking.py     multi-year tracking for quantified targets
+    compare.py      cross-company comparison
+    evaluation.py   agreement metrics, threshold selection, provenance
+    benchmark.py    gold-set annotation templates and scoring
+    pipeline.py     orchestration and CLI
+    ui.py           Streamlit UI components
+  app.py            Streamlit entry point
+  eval/             OSDG sanity check, gold template and benchmark scoring scripts
+  prompts/          judge system prompt and examples
+  data/             SDG targets, annotation guidelines, manifests (reports not redistributed)
+  docs/             rubric definition and calibration notes
+  tests/            unit tests
 ```
 
-## Parse a report (Phase 1)
+## 9. Datasets and external resources
 
-```powershell
-python -m prism17.parse data/reports/sjs_india_brsr_fy2023_24.pdf
-```
+| Resource | Use | Notes |
+|---|---|---|
+| **UN SDG targets and indicators** | Reference text for retrieval | Official UN framework |
+| **OSDG Community Dataset (OSDG-CD), v2024.04** | Sanity check of the SDG-relevance step and retrieval threshold only | <https://zenodo.org/records/11441197>, licence CC-BY-4.0 per the dataset record. Cite the original release, DOI 10.5281/zenodo.5550238. SDG labels only, so it cannot test rubric levels or verification |
+| **Corporate BRSR and sustainability reports** | Inputs and benchmark | Public reports, recorded in `data/manifest.csv` with source links once finalised. PDFs are not redistributed |
+| **Self-built gold set** | Evaluation of mapping, rubric and verification | In preparation: two independent annotators with adjudication. Guidelines are in `data/gold/ANNOTATION_GUIDELINES.md` |
+| **Open models and libraries** | See Section 6 | Used under their respective licences. Llama and Gemma are open-weight with their own licence terms |
 
-Write the full parsed document to JSON:
+No DEV or test report is used to tune prompts or thresholds. Threshold suggestions come from OSDG data only.
 
-```powershell
-python -m prism17.parse data/reports/sjs_india_brsr_fy2023_24.pdf --out outputs/sjs.parse.json
-```
+## 10. Evaluation plan and results
 
-The parser:
+**Plan**
 
-- extracts text page by page, with 1-indexed page numbers matching a PDF viewer;
-- splits body text into passages of roughly 50-250 words;
-- extracts tables separately with `is_table: true`;
-- records unreadable pages instead of crashing;
-- keeps raw page text for later quote verification.
+- Benchmark of reports across multiple companies and years (final number to be fixed), with a split by company into dev and held-out test.
+- Passages annotated independently by two annotators for SDG relevance, target mapping and rubric dimensions, with disagreements adjudicated.
+- Metrics: SDG-mapping precision, recall and F1; Cohen's kappa for annotators and for system-versus-human rubric agreement; quote-verification pass rate; hallucination rate before filtering; semantic-support check accuracy.
+- Baselines and ablations: keyword matching, pipeline without verification, pipeline without the rubric.
+- Model comparison with runtime and energy per report, plus error analysis of failure cases.
 
-Phase 1 verification on the bundled sample: 59 pages, 326 passages (313 body,
-13 tables), 0 unreadable pages, about 11 seconds on CPU. A blank-page test
-confirms that unreadable pages are reported without a crash.
+**Results**
 
-## Audit a report (Phase 2)
+| Item | Status |
+|---|---|
+| Unit tests | 244 passed at the last full run; a few later edits to tracking unit parsing were made after that run |
+| OSDG relevance sanity check | Script built, smoke-tested without the judge. Full run pending (dataset not yet downloaded) |
+| Stage 2 semantic check | Implemented. Deterministic guard is tested. NLI model not yet validated end to end |
+| Benchmark tooling | Template generator and scorer work. Blank or invalid labels give explicit statuses and null metrics |
+| Gold-set benchmark | No human annotations exist yet |
+| Final metrics | **Not yet available. To be added only once measured** |
 
-Make sure Ollama is running and the default model is available:
+## 11. Progress and roadmap
 
-```powershell
+- [x] Project scaffold, config, SDG target data
+- [x] PDF parsing into page-tagged passages
+- [x] Retrieval and local LLM judge with caching and retry
+- [x] Quote verification (stage 1) and deterministic rubric with tests
+- [x] HTML report, coverage matrix and improvement guidance
+- [x] Streamlit interface with human-review controls (being verified on real reports)
+- [x] OSDG sanity-check script and evaluation helpers
+- [x] Semantic-support check (stage 2) implemented, off by default (not yet validated end to end)
+- [x] Multi-year tracking for quantified targets
+- [x] Cross-company comparison view
+- [x] Benchmark annotation guidelines, template generator and scoring script
+- [ ] Full OSDG sanity-check run and retrieval-threshold selection
+- [ ] Human-annotated gold set (dev, then held-out test)
+- [ ] Evaluation run, baselines, ablations and error analysis
+- [ ] Live demo and demo video
+
+## 12. Running the project
+
+```bash
+# 1. Install Ollama and pull a model
 ollama pull qwen2.5:7b-instruct
-```
 
-Run the full local pipeline:
+# 2. Install dependencies
+python -m venv .venv
+.venv\Scripts\activate          # Windows (use: source .venv/bin/activate on Linux/macOS)
+pip install -r requirements.txt
 
-```powershell
-python -m prism17.pipeline data/reports/sjs_india_brsr_fy2023_24.pdf --out outputs/sjs.audit.json
-```
+# 3. Run the command-line pipeline on a report
+python -m prism17.pipeline path/to/report.pdf
+#    add --semantic to enable the stage 2 support check
 
-For a quicker first run, restrict the goals, pages, and number of candidates:
-
-```powershell
-python -m prism17.pipeline data/reports/sjs_india_brsr_fy2023_24.pdf `
-  --sdg 13 --max-pages 20 --max-candidates 20 --out outputs/sjs.phase2.json
-```
-
-The pipeline:
-
-1. parses the PDF into page-level passages;
-2. embeds passages and the SDG targets locally with
-   `BAAI/bge-small-en-v1.5`, then retrieves candidates with FAISS on CPU;
-3. asks the local Ollama judge for strict JSON on each candidate;
-4. verifies the returned quote against the source page (exact match after
-   whitespace/hyphenation normalisation, then RapidFuzz partial ratio >= 95);
-5. optionally checks semantic support for the claim/quote pair (Stage 2,
-   disabled by default);
-6. applies the deterministic rubric;
-7. prints scored findings with page numbers and verified quotes, and writes the
-   full JSON, including findings that need human review;
-8. optionally renders a Markdown and/or HTML SDG Alignment Report when
-   `--report` or `--html-report` is used.
-
-Useful options: `--model llama3.1:8b`, `--top-k`, `--min-score`,
-`--fuzzy-threshold`, `--max-candidates`, `--no-tables`, `--scored-only`,
-`--semantic`/`--no-semantic`, and `--verbose`. The first run downloads the
-embedding model and caches embeddings under `.cache/prism17/`.
-
-### Phase 2 verification on the sample report
-
-The bundled 59-page BRSR was run end to end with `qwen2.5:7b-instruct` on CPU:
-
-```powershell
-python -m prism17.pipeline data/reports/sjs_india_brsr_fy2023_24.pdf `
-  --sdg 12 --max-candidates 12 --out outputs/sjs.phase2.json
-```
-
-- 59 pages, 326 passages (13 tables), 0 unreadable pages.
-- 978 Goal 12 candidates retrieved from 11 targets; the top 12 were judged.
-- 2 findings scored, 10 judged not relevant, 0 needs review.
-- Scored: target 12.5, page 49, Level 2, quote verified with `page_fuzzy`
-  96.84; target 12.6, page 25, Level 1, quote verified with `page_exact` 100.0.
-- About 10.5 minutes of wall-clock time, dominated by 12 local judge calls.
-
-The artifact is `outputs/sjs.phase2.json`. Every scored entry carries
-`source_page`, `quote_verified: true`, `quote_method`, `quote_score`, and the
-rubric level. The run also confirms the review split: passages the judge marks
-not relevant are counted separately from findings that need human review.
-
-### Rubric (disclosure quality, not performance)
-
-Rules are applied in order; the first matching rule wins.
-
-| Level | Deterministic rule |
-| --- | --- |
-| 1 | The passage says the action is not applicable, not done, or not measured; or the disclosure is not specific. |
-| 2 | Specific action plus at least one of: measurable indicator, deadline, baseline, reported progress. |
-| 3 | Specific action plus a measurable indicator and a deadline. |
-| 4 | Specific action plus a measurable indicator, deadline, baseline, and reported progress. |
-
-Every finding also carries a list of disclosure gaps for the dimensions that
-are absent. A finding is never scored without a verified quote and a page
-number.
-
-## Generate the SDG Alignment Report (Phase 3)
-
-The report is deterministic and can be rendered during an audit run or from an
-existing audit JSON, without re-running the judge.
-
-During a run:
-
-```powershell
-python -m prism17.pipeline data/reports/sjs_india_brsr_fy2023_24.pdf `
-  --sdg 12 --max-candidates 12 `
-  --out outputs/sjs.phase2.json `
-  --report outputs/sjs.report.md `
-  --html-report outputs/sjs.report.html
-```
-
-From an existing audit JSON:
-
-```powershell
-python -m prism17.report outputs/sjs.phase2.json `
-  --out outputs/sjs.report.md `
-  --html outputs/sjs.report.html
-```
-
-Use `--company "Example Ltd"` and `--title "..."` to override the header.
-
-To render a reviewed report from the CLI, pass the review file saved by the UI:
-
-```powershell
-python -m prism17.report outputs/sjs.phase2.json `
-  --reviews outputs/sjs.phase2.reviews.json `
-  --out outputs/sjs.reviewed.md `
-  --html outputs/sjs.reviewed.html
-```
-
-The report contains:
-
-- report details and a disclosure-scope disclaimer;
-- a summary of scored findings, level distribution, and coverage;
-- coverage by goal, including targets with and without scored disclosure;
-- scored findings grouped by goal and target, each with page, verified quote,
-  level, assessment, disclosure gaps, and suggested improvements;
-- goals without scored findings, with neutral guidance and a retrieval caveat;
-- findings that need human review, listed separately;
-- method, limitations, and responsible-use notes.
-
-The bundled sample's report is `outputs/sjs.report.md`, with an HTML companion
-at `outputs/sjs.report.html`. Coverage counts only what was retrieved and
-judged: a target with no scored finding is reported as "not identified", not as
-evidence that the company does nothing.
-
-## Human review in the Streamlit UI (Phase 4)
-
-Start the local UI from the project root:
-
-```powershell
+# 4. Or launch the interface
 streamlit run app.py
+
+# 5. Multi-year tracking and cross-company comparison on audit JSON files
+python -m prism17.tracking earlier.audit.json later.audit.json
+python -m prism17.compare a.audit.json b.audit.json --labels "Company A" "Company B"
+
+# 6. Benchmark tooling (annotation template, then scoring)
+python eval/make_gold_template.py earlier.audit.json later.audit.json --out template.csv
+python eval/score_benchmark.py template.csv --out eval/benchmark.json
+
+# 7. Run tests
+python -m pytest -q
 ```
 
-The UI opens on the bundled audit (`outputs/sjs.phase2.json`) if it exists. Use
-the sidebar to load another audit JSON, or to run a new audit from a PDF path or
-upload. A new audit uses the same local pipeline and the same Ollama model as the
-CLI; run limits for pages and candidates are exposed so a first run stays short.
+Run `--help` on each command for the full option list (for example `--min-level`, `--sdg`, `--out`).
 
-The four tabs are:
+## 13. Responsible use and limitations
 
-1. **Summary & coverage** — scored findings, targets with disclosure, judged
-   candidates, review status, and per-goal and per-target coverage.
-2. **Findings review** — one editable row per scored finding. Target, page,
-   rubric level, and the verified quote are read-only. A reviewer can set the
-   status to `pending`, `confirmed`, `overridden`, or `flagged`, add a reviewer
-   level, reviewer name, and note, then save.
-3. **Needs review** — findings that could not be scored because the quote was
-   unverified or the judge output failed validation, plus the candidates that
-   were judged not relevant.
-4. **Report** — the reviewed report preview and Markdown/HTML downloads. A
-   button writes reviewed artifacts to `outputs/`.
+- Prism17 assesses the **quality of disclosure**, not real-world sustainability performance, and cannot verify that a claim is true.
+- It never labels a company as misleading or irresponsible. Flags use neutral wording such as "disclosure gap".
+- Low-confidence findings are left unscored and routed to a human reviewer, who can override any finding. Review decisions annotate the report and do not change the rubric level.
+- The rubric measures specificity, which is a proxy and not proof of credibility.
+- Accuracy drops on scanned or poorly formatted PDFs and complex tables, and small open models can miss nuance in long passages.
+- Multi-year tracking covers quantified disclosure only. It does not match reworded indicators, adjust for restatements, or establish a trend. A target missing from a later report may have moved to another section or not been retrieved.
+- Cross-company comparison is descriptive. It does not normalise for report length, sector or retrieval settings and must not be used as a ranking.
+- No accuracy figures are claimed until they are measured on a human-annotated benchmark.
+- The rubric, prompts and evaluation results will be published for audit.
 
-Review decisions are stored separately from the audit, by default next to the
-audit JSON as `<audit-stem>.reviews.json`. Each decision is keyed by
-`passage_id|target_id|page`. The rubric level is never overwritten: an override
-records a reviewer level alongside it, so the original assessment stays
-auditable. Saving a review does not re-run retrieval or the judge, and the
-coverage counts still describe the original scored findings.
+## 14. AI assistance disclosure
 
-The UI is single-user and local. It has no authentication and is not intended
-to be exposed on a network.
+AI coding and research assistants were used during the development of this project, as permitted by the hackathon rules. The team is responsible for the submitted work and will be able to explain it during evaluation.
 
-## Stage 2 semantic verification (Phase 5)
+Claude, Gemini and ChatGPT were used for research and literature review. A manual Google Scholar search was then carried out to validate the findings. For small code snippets and function writing, Claude Code and OpenCode were used.
 
-Stage 1 checks that a quote exists on the cited page. Stage 2 checks whether the
-quote supports the claim attributed to it. It combines:
+Separately, Prism17 itself uses open-weight language models at runtime, as described in Section 6.
 
-1. a deterministic consistency guard for years, numbers, units, negation, and
-   commitment status (planned, ongoing, achieved);
-2. a local semantic decision from the NLI cross-encoder
-   `cross-encoder/nli-deberta-v3-small`, or optionally from the local Ollama
-   model.
+## 15. Team and acknowledgements
 
-No text is sent to a remote AI service. Enable it for one run:
+**Team:** Prateek Kumar and Pritam Bhakta (Students), Dr Pushan Kumar Dutta (Faculty Guide and Researcher), Amity University Kolkata
 
-```powershell
-python -m prism17.pipeline data/reports/sjs_india_brsr_fy2023_24.pdf `
-  --sdg 12 --max-candidates 12 --semantic `
-  --out outputs/sjs.semantic.json
-```
+**Acknowledgements:** UN Statistics Division (SDG framework), the OSDG project and its community (OSDG Community Dataset), and the open-source authors of Ollama, PyMuPDF, pdfplumber, sentence-transformers, FAISS, rapidfuzz, Streamlit, Jinja2, pandas and scikit-learn. Model weights (Qwen, Llama, Gemma) are used under their respective licences.
 
-Or enable it in `config.yaml`:
+**Pre-existing work:** The project was built during the hackathon period. It reuses only the open-source libraries, public datasets and open-weight models listed above.
 
-```yaml
-verification:
-  semantic_enabled: true
-  semantic_method: nli          # nli or llm
-  nli_supported_threshold: 0.60
-  nli_uncertain_threshold: 0.35
-```
+---
 
-Outcomes and their effect on scoring:
-
-| Status | Meaning | Can be scored? |
-| --- | --- | --- |
-| `supported` | The quote supports the claim. | Yes |
-| `not_checked` | The optional model was unavailable or the input was empty. Stage 1 still applies. | Yes |
-| `uncertain` | The guard found a mismatch, or the model score is between the two thresholds. | No, needs human review |
-| `not_supported` | The model found that the quote does not support the claim. | No, needs human review |
-
-The consistency guard is one-directional: everything in the claim must be
-traceable to the quote, while the quote may contain extra context. A paraphrase
-that drops a number or changes a year is flagged as `uncertain`, not silently
-accepted. Stage 2 is conservative by design, and its effect has not yet been
-benchmarked against human labels.
-
-## Evidence coverage matrix
-
-The report adds a five-dimension matrix for every reviewed claim:
-specificity, measurable indicator, deadline, baseline, and reported progress.
-Each dimension is `present`, `absent`, or `n/a`:
-
-- **present** — the judge identified the dimension in the verified quote;
-- **absent** — a disclosure gap in that quote, not proof that the company does
-  nothing;
-- **n/a** — the claim could not be assessed and needs human review.
-
-The matrix is a view of the same judged findings, not a second score. It is
-available in the Markdown report, the HTML report, the audit JSON, and the
-Streamlit summary tab. Neutral flags use wording such as "low specificity" and
-"disclosure gap".
-
-## Multi-year tracking (Phase 6)
-
-Compare quantified targets across two audits:
-
-```powershell
-python -m prism17.tracking `
-  outputs/earlier.audit.json outputs/later.audit.json `
-  --out outputs/tracking.json `
-  --markdown outputs/tracking.md
-```
-
-Tracking is deliberately narrow:
-
-- only scored Level 3 or Level 4 findings are compared by default (change with
-  `--min-level` or `tracking.min_level`);
-- one representative finding per target is chosen deterministically: highest
-  rubric level, then judge confidence, then page and passage id;
-- values are compared only when a recognised unit was extracted from both
-  reports and the units match, including multipliers such as `million`; when
-  both reports record a baseline, those baselines must also agree; a missing
-  unit, mismatched unit, or changed baseline is reported as `not comparable`;
-- a missing later target is labelled `not found in later report (needs review)`
-  and is **never** described as discontinued;
-- direction comes from the target wording; if the favourable direction cannot
-  be inferred, the result is `changed`, not `progressing`.
-
-The Markdown output states these limits. Review both source pages before using a
-comparison.
-
-## Cross-company comparison (Phase 6)
-
-Place two or more audits side by side:
-
-```powershell
-python -m prism17.compare `
-  outputs/company_a.audit.json outputs/company_b.audit.json `
-  --labels "Company A" "Company B" --sdg 12 --sdg 13 `
-  --out outputs/compare.json `
-  --markdown outputs/compare.md
-```
-
-The comparison reports scored findings, high-level counts, best level, targets
-with scored disclosure, per-goal metrics, level distribution, and review status.
-High-level means rubric Level 3 or above by default; change it with
-`compare.min_level` in `config.yaml` or `--min-level`, and the rendered label
-follows the threshold (for example, `L2+`). The comparison counts only scored
-findings and states that differences may come from report scope, retrieval depth,
-or the number of judged candidates. It is **descriptive, not a ranking**, and it
-does not assess real-world performance.
-
-## Evaluation and annotation (Phase 5)
-
-### Retrieval and relevance check on OSDG
-
-```powershell
-python eval/osdg_check.py --sample-size 200
-python eval/osdg_check.py --sample-size 20 --skip-judge  # smoke test
-```
-
-Download the OSDG Community Dataset (version 2024.04) first, as described in the
-script. This evaluates retrieval and relevance only, not the rubric.
-
-### Human gold annotations
-
-No gold annotations are bundled. Generate a blank template from an existing
-audit:
-
-```powershell
-python eval/make_gold_template.py outputs/sjs.phase2.json `
-  --out data/gold/annotation_template.csv
-```
-
-The `reviewer_*` columns are empty. Follow
-[`data/gold/ANNOTATION_GUIDELINES.md`](data/gold/ANNOTATION_GUIDELINES.md),
-fill a copy by hand, then score it:
-
-```powershell
-python eval/score_benchmark.py data/gold/annotations.csv `
-  --out eval/benchmark.json
-```
-
-The scorer reports relevance precision/recall/F1, quote-verification agreement,
-rubric exact agreement, within-one agreement, mean absolute difference, Cohen's
-kappa, quadratic weighted kappa, semantic-support agreement, confusion matrices,
-and the number of annotated pairs. With blank reviewer columns it writes
-`status: "no_annotations"` and null metrics; it never fills in placeholder
-numbers. Invalid reviewer values yield `status: "invalid_annotations"`, and
-annotations without a model counterpart yield `status: "no_pairs"`, again with
-null metrics. For a benchmark claim, use independent double annotation and
-report agreement and the sampling frame.
-
-See [`docs/RUBRIC.md`](docs/RUBRIC.md) for the rubric definition and calibration
-notes.
-
-## Run tests
-
-```powershell
-python -m pytest
-```
-
-## SDG data
-
-`data/sdg_targets.json` contains all 17 goals and all 169 targets, with each
-target's `id`, `goal`, and `text`. Target texts follow the UN 2030 Agenda
-framework. The source note is stored in the JSON file.
-
-## Configuration
-
-Edit `config.yaml` to change the embedding model, retrieval depth, LLM model,
-verification thresholds, or report defaults. Paths are resolved relative to the
-project root.
-
-## Current limitations
-
-- Stage 2 semantic verification has not yet been validated end to end on the
-  bundled sample with the NLI model enabled. It is disabled by default to avoid a
-  model download on a first CPU run.
-- The deterministic consistency guard is conservative. A faithful paraphrase
-  that omits a number, year, or unit can be marked `uncertain` and sent to human
-  review.
-- No human gold annotations are bundled, so there are no measured benchmark
-  results for relevance, rubric levels, or semantic support. The annotation
-  scripts are tooling, not evidence.
-- Quote verification checks that the quote exists on the source page. Stage 2
-  checks support, but neither stage proves that the company's statement is true.
-- Mapping a company passage to a UN SDG target is an approximation. A human
-  reviewer should confirm that the target is a reasonable fit.
-- The local judge can misclassify a passage. Findings that fail schema checks or
-  quote verification are kept as "needs review" and never scored.
-- The default 7B judge is conservative. In local testing it marked many
-  plausibly related passages as not relevant, so recall is lower than a larger
-  model would give. Raise `--max-candidates` and review the unscored output
-  before drawing conclusions from a zero-score run.
-- Scanned pages without a text layer are reported as unreadable. OCR is not part
-  of the current pipeline.
-- Table extraction is best-effort; a table quote may be verified against the
-  parsed table passage when the raw page layout differs.
-- Dimension flags come from the judge. A prior-year column in a table can be
-  present in the quote while the judge still marks `baseline` false, so the
-  listed disclosure gaps and the coverage matrix should be read alongside the
-  quote.
-- Judging every candidate on a laptop is slow. Use `--sdg`, `--max-pages`, and
-  `--max-candidates` for quick runs.
-- Coverage is limited to the focus goals, targets, and candidates that were
-  retrieved and judged in a run. It is not a complete inventory of the report.
-- Report guidance is deterministic template text keyed to rubric gaps. It is
-  not tailored to the company's sector, strategy, or prior commitments.
-- Human-review decisions annotate the report; they do not change the rubric
-  level, coverage counts, or the audit JSON. Treat them as an audit trail for a
-  reviewer, not as a second scoring system.
-- Multi-year tracking compares quantified Level 3/4 disclosure by default. It does
-  not match reworded indicators, adjust for restatements, or establish a trend. A
-  target absent from a later report may have been moved to another section or
-  simply not retrieved.
-- Cross-company comparison is descriptive. It does not normalize for report
-  length, page coverage, sector, or retrieval settings, so it must not be used
-  as a league table.
-- The Streamlit UI is single-user and local, with no authentication. Do not
-  expose it on a network. A review file must be kept with its audit JSON because
-  decisions are keyed to that run's passages and pages.
-- Reports are Markdown and HTML; there is no PDF export.
-
-## Responsible use
-
-- A disclosure gap is not proof of poor performance.
-- A high level reflects the presence of measurable, time-bound, baseline-
-  anchored disclosure, not the quality of the underlying activity.
-- Quotes are checked against the source page, but semantic support and rubric
-  decisions should be reviewed by a human.
-- A missing target in a later report is not evidence that the target was
-  discontinued.
-- A cross-company table is a comparison of disclosure, not a ranking.
-- The tool must not be used to make automated accusations about a company.
-
-## Sample document
-
-`data/reports/sjs_india_brsr_fy2023_24.pdf` is a publicly filed BRSR used for
-local testing. It remains the property of its publisher and is included only as
-a development fixture.
+*This repository documents work in progress for THREWS ODYSSEY 2026.*
