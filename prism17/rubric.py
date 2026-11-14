@@ -129,6 +129,7 @@ def grade_finding(finding: VerifiedFinding) -> VerifiedFinding:
     if (
         not finding.quote_verified
         or finding.review_reason is not None
+        or finding.semantic_support in {"not_supported", "uncertain"}
         or not finding.judged.relevant
         or not finding.judged.scored
     ):

@@ -53,17 +53,17 @@ llm:
 verification:
   # Stage 1: quote existence.
   fuzzy_threshold: 95
-  # Stage 2: semantic support. One of: nli, llm.
-  # Off by default so a first CPU run does not download the NLI model. Enable
-  # with `--semantic` on the pipeline or set this to true.
+  # Stage 2 is opt-in because the NLI model adds startup and CPU cost.
+  # Enable it with `--semantic` or by setting this to true.
   semantic_enabled: false
+  # Stage 2: semantic support. One of: nli, llm.
   semantic_method: nli
   nli_model: cross-encoder/nli-deberta-v3-small
   nli_supported_threshold: 0.60
   nli_uncertain_threshold: 0.35
 
 rubric:
-  # Deterministic level rules are documented in README.md and implemented
+  # Deterministic level rules are documented in docs/RUBRIC.md and implemented
   # in prism17/rubric.py. Do not change these without updating the tests.
   levels: [1, 2, 3, 4]
 
@@ -74,12 +74,16 @@ report:
   report_title: SDG Alignment Report
 
 tracking:
-  # Narrow multi-year tracking compares quantified (L3/L4 by default) findings.
+  # Narrow multi-year tracking compares quantified findings at or above this
+  # rubric level. Override with `--min-level`.
   min_level: 3
+  # Targets are matched by exact SDG target ID. Reworded indicators are not
+  # matched, because fuzzy matching would risk a false comparison.
   require_same_unit: true
 
 compare:
-  # High-specificity threshold. Keep high_level_label in step with min_level;
+  default_sdg: 13
+  # High-level count threshold. Keep high_level_label in step with min_level;
   # a --min-level override renders its own L<n>+ label.
   min_level: 3
   high_level_label: "L3+"

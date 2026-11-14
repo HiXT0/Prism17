@@ -19,8 +19,10 @@ import pandas as pd
 import streamlit as st
 
 from .config import PROJECT_ROOT, load_config, resolve_path
+from .coverage import EVIDENCE_DIMENSIONS
 from .pipeline import PipelineResult, run_pipeline, write_output
 from .report import (
+    EVIDENCE_MATRIX_NOTE,
     ReportData,
     render_html,
     render_markdown,
@@ -38,7 +40,7 @@ from .review import (
     summarise_reviews,
 )
 
-DEFAULT_AUDIT = "outputs/sjs.phase2.json"
+DEFAULT_AUDIT = "examples/sjs.audit.json"
 DEFAULT_PDF = "data/reports/sjs_india_brsr_fy2023_24.pdf"
 MODEL_CHOICES = ("qwen2.5:7b-instruct", "llama3.1:8b", "gemma2:9b")
 
@@ -65,6 +67,15 @@ def _default_review_path(audit_path: str | Path | None) -> Path | None:
 
 def _level_text(level: Any) -> str:
     return f"Level {int(level)}" if level not in (None, "") else "—"
+
+
+def _dimension_cells(dimensions: Any) -> dict[str, str]:
+    """Map dimension labels to compact cells for the evidence matrix."""
+    by_key = {item.key: item for item in dimensions}
+    return {
+        label: by_key[key].text() if key in by_key else "-"
+        for key, label in EVIDENCE_DIMENSIONS
+    }
 
 
 def _short(text: Any, limit: int = 180) -> str:
@@ -332,6 +343,32 @@ def _tab_summary(data: ReportData) -> None:
     else:
         st.info("No focus goals were available for coverage accounting.")
 
+    st.subheader("Evidence coverage matrix")
+    st.caption(EVIDENCE_MATRIX_NOTE)
+    if data.coverage.goals:
+        matrix_rows = [
+            {
+                "Goal": f"Goal {goal.goal}",
+                "Scored findings": goal.finding_count,
+                **_dimension_cells(goal.dimensions),
+            }
+            for goal in data.coverage.goals
+        ]
+        matrix_rows.append(
+            {
+                "Goal": "All focus goals",
+                "Scored findings": sum(
+                    goal.finding_count for goal in data.coverage.goals
+                ),
+                **_dimension_cells(data.coverage.dimension_totals),
+            }
+        )
+        st.dataframe(
+            pd.DataFrame(matrix_rows), hide_index=True, width="stretch"
+        )
+    else:
+        st.info("No scored findings were available for dimension accounting.")
+
     with st.expander("Target-level coverage"):
         target_rows = [
             {
@@ -346,39 +383,6 @@ def _tab_summary(data: ReportData) -> None:
             for target in goal.targets
         ]
         st.dataframe(pd.DataFrame(target_rows), hide_index=True, width="stretch")
-
-    with st.expander("Evidence coverage matrix"):
-        st.caption(
-            "Absent means the judge did not identify that dimension in the "
-            "verified quote. It is a disclosure gap, not proof of inaction. "
-            "n/a means the claim could not be assessed and needs review."
-        )
-        if not data.coverage_matrix.claims:
-            st.info("No reviewed claims are available for the matrix.")
-        else:
-            matrix_rows = [
-                {
-                    "Target": claim.target_id,
-                    "Page": claim.page,
-                    "Level": _level_text(claim.level),
-                    "Specificity": claim.dimensions.get(
-                        "specificity", "not_assessable"
-                    ),
-                    "Measurable indicator": claim.dimensions.get(
-                        "measurable_indicator", "not_assessable"
-                    ),
-                    "Deadline": claim.dimensions.get("deadline", "not_assessable"),
-                    "Baseline": claim.dimensions.get("baseline", "not_assessable"),
-                    "Reported progress": claim.dimensions.get(
-                        "reported_progress", "not_assessable"
-                    ),
-                    "Flags": ", ".join(claim.flags) or "none",
-                }
-                for claim in data.coverage_matrix.claims
-            ]
-            st.dataframe(
-                pd.DataFrame(matrix_rows), hide_index=True, width="stretch"
-            )
 
 
 def _review_dataframe(

@@ -34,7 +34,7 @@ try:  # PyMuPDF >= 1.24 exposes the non-deprecated ``pymupdf`` name.
 except ImportError:  # pragma: no cover - compatibility with older PyMuPDF
     import fitz  # type: ignore[no-redef]
 
-from .config import get, load_config, resolve_path
+from .config import display_path, get, load_config, resolve_path
 
 LOGGER = logging.getLogger(__name__)
 
@@ -728,7 +728,7 @@ def parse_pdf(
     )
 
     return ParsedDocument(
-        pdf_path=str(path),
+        pdf_path=display_path(path, cfg),
         title=path.stem,
         page_count=pages_to_parse,
         passages=passages,

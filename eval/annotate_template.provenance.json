@@ -1,0 +1,102 @@
+{
+  "created_at_utc": "2026-11-14T05:20:01+00:00",
+  "dataset": {
+    "name": "Prism17 DEV annotation sample",
+    "version": "0.1",
+    "split": "dev",
+    "manifest": {
+      "path": "data/reports/manifest.csv",
+      "name": "manifest.csv",
+      "bytes": 668,
+      "sha256": "b8562b5e6e737756e783c72f5de6cd162e4e0b398bdecc72c852e2ab55d861a7",
+      "md5": "7f382bc8cdbb908a2f8fd177275760d5"
+    }
+  },
+  "reports": [
+    {
+      "report_id": "sjs_india_brsr_fy2023_24",
+      "company": "S.J.S. Enterprises",
+      "year": "FY2023-24",
+      "split": "dev",
+      "path": "data/reports/sjs_india_brsr_fy2023_24.pdf",
+      "sha256": "0e18fd144ff02e331a1f2711360cdc757490a36c8f236fcc1911a5cabd1013a4",
+      "pages": 59,
+      "passages": 326,
+      "table_passages": 13,
+      "judged": 25,
+      "strata": {
+        "scored": 7,
+        "rejected": 18,
+        "review": 0,
+        "table": 7,
+        "levels": {
+          "1": 3,
+          "2": 4,
+          "3": 0,
+          "4": 0
+        }
+      }
+    },
+    {
+      "report_id": "srf_fy2024_25",
+      "company": "SRF",
+      "year": "FY2024-25",
+      "split": "dev",
+      "path": "data/dataset_prism17/srf_fy2024_25.pdf.pdf",
+      "sha256": "3a2924217244b8ad239f5a4f30a3693086f9a71c0c167b588eee4d1751024750",
+      "pages": 43,
+      "passages": 208,
+      "table_passages": 24,
+      "judged": 25,
+      "strata": {
+        "scored": 7,
+        "rejected": 18,
+        "review": 0,
+        "table": 7,
+        "levels": {
+          "1": 6,
+          "2": 1,
+          "3": 0,
+          "4": 0
+        }
+      }
+    },
+    {
+      "report_id": "tata_projects_fy2024_25",
+      "company": "Tata Projects",
+      "year": "FY2024-25",
+      "split": "dev",
+      "path": "data/dataset_prism17/tata_projects_fy2024_25.pdf",
+      "sha256": "cbfbbdcda412bc650471fc8e26235c45d838e98dc0964caca9952c71ad016782",
+      "pages": 34,
+      "passages": 219,
+      "table_passages": 63,
+      "judged": 25,
+      "strata": {
+        "scored": 9,
+        "rejected": 16,
+        "review": 0,
+        "table": 7,
+        "levels": {
+          "1": 9,
+          "2": 0,
+          "3": 0,
+          "4": 0
+        }
+      }
+    }
+  ],
+  "sample": {
+    "requested": 175,
+    "rows": 175,
+    "seed": 17,
+    "judged_model_columns": true,
+    "per_report_judge_limit": 25
+  },
+  "notes": [
+    "Only manifest rows with split == 'dev' were opened.",
+    "Test and excluded reports were not parsed, judged, or used.",
+    "Reviewer columns are blank by design; fill them from the PDF.",
+    "Rows with blank model columns are retrieval candidates, not judged predictions, and cannot be paired in benchmark scoring."
+  ]
+}

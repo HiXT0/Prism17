@@ -1,54 +1,59 @@
-"""Tests for annotation templates and benchmark scoring."""
+"""Tests for human-annotation benchmark tooling."""
 
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 from prism17.benchmark import (
-    ANNOTATION_FIELDS,
-    build_annotation_rows,
-    read_annotation_csv,
+    BENCHMARK_FIELDS,
+    parse_bool,
+    parse_level,
+    parse_semantic,
+    read_rows,
     score_annotations,
-    write_annotation_csv,
+    score_csv,
+    template_rows,
+    write_report,
+    write_template,
 )
 from prism17.models import Candidate, JudgedFinding, VerifiedFinding
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _finding(
-    target_id: str = "13.2",
     *,
+    target_id: str = "13.2",
+    goal: int = 13,
     level: int | None = 3,
     relevant: bool = True,
     quote_verified: bool = True,
     semantic_support: str = "not_checked",
-    review_reason: str | None = None,
     page: int = 10,
 ) -> VerifiedFinding:
+    quote = "Example quote with enough words to verify against the page."
     candidate = Candidate(
         passage_id=f"p{page:04d}-001",
         page=page,
         target_id=target_id,
-        target_goal=int(target_id.split(".", 1)[0]),
-        target_text="Target text",
+        target_goal=goal,
+        target_text=f"Target {target_id}",
         score=0.8,
-        passage_text="Passage text",
+        passage_text=quote,
     )
     judged = JudgedFinding(
         candidate=candidate,
         relevant=relevant,
-        sdg_goal=int(target_id.split(".", 1)[0]),
+        sdg_goal=goal,
         sdg_target=target_id,
         claim="Example claim.",
-        supporting_quote="Example quote.",
-        dimensions={"specificity": True},
+        supporting_quote=quote,
+        dimensions={"specificity": True, "measurable_indicator": True},
         scored=True,
     )
     return VerifiedFinding(
@@ -58,129 +63,191 @@ def _finding(
         quote_score=100.0 if quote_verified else 0.0,
         source_page=page,
         semantic_support=semantic_support,
-        level=level if quote_verified else None,
-        review_reason=review_reason,
+        level=level,
     )
 
 
-def _payload(findings: list[VerifiedFinding]) -> dict:
+def _payload(
+    findings: list[VerifiedFinding], *, title: str = "Alpha 2022"
+) -> dict:
     return {
-        "document": {
-            "title": "Example Report FY2023-24",
-            "pdf_path": "reports/example.pdf",
-            "page_count": 59,
-        },
+        "schema_version": "0.1",
+        "document": {"title": title, "year": 2022},
         "findings": [finding.to_dict() for finding in findings],
     }
 
 
-def _row(
-    *,
-    reviewer_relevant: str = "",
-    model_relevant: str = "1",
-    reviewer_level: str = "",
-    model_level: str = "3",
-    reviewer_quote_ok: str = "",
-    model_quote_verified: str = "1",
-    reviewer_semantic_support: str = "",
-    model_semantic_support: str = "not_checked",
-) -> dict[str, str]:
-    return {
+def _row(**overrides: str) -> dict[str, str]:
+    row = {
         "annotation_id": "ann-0001",
-        "page": "10",
+        "company": "Alpha",
+        "year": "2022",
+        "source_path": "alpha.json",
+        "title": "Alpha 2022",
         "target_id": "13.2",
+        "page": "10",
+        "passage_id": "p0010-001",
         "claim": "Example claim.",
         "quote": "Example quote.",
-        "model_relevant": model_relevant,
-        "model_level": model_level,
-        "model_quote_verified": model_quote_verified,
-        "model_semantic_support": model_semantic_support,
-        "reviewer_relevant": reviewer_relevant,
-        "reviewer_level": reviewer_level,
-        "reviewer_quote_ok": reviewer_quote_ok,
-        "reviewer_semantic_support": reviewer_semantic_support,
+        "model_relevant": "1",
+        "model_level": "3",
+        "model_quote_ok": "1",
+        "model_semantic_support": "not_checked",
+        "model_review_reason": "",
+        "reviewer_relevant": "",
+        "reviewer_level": "",
+        "reviewer_quote_ok": "",
+        "reviewer_semantic_support": "",
+        "reviewer_notes": "",
+        "annotator": "",
+        "annotated_at_utc": "",
+    }
+    row.update(overrides)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_bool_accepts_common_forms_and_blank() -> None:
+    assert parse_bool("1") is True
+    assert parse_bool("yes") is True
+    assert parse_bool("TRUE") is True
+    assert parse_bool("0") is False
+    assert parse_bool("no") is False
+    assert parse_bool("") is None
+    assert parse_bool(None) is None
+
+
+def test_parse_bool_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError):
+        parse_bool("maybe")
+
+
+def test_parse_level_accepts_strict_integers_only() -> None:
+    assert parse_level("3") == 3
+    assert parse_level(" 4 ") == 4
+    assert parse_level("") is None
+    assert parse_level(None) is None
+
+    for invalid in ("3.7", "5", "0", "abc", "-1"):
+        with pytest.raises(ValueError):
+            parse_level(invalid)
+
+
+def test_parse_semantic_normalises_and_rejects_unknown_labels() -> None:
+    assert parse_semantic("supported") == "supported"
+    assert parse_semantic("Not-Supported") == "not_supported"
+    assert parse_semantic("not checked") is None
+    assert parse_semantic("") is None
+    assert parse_semantic(None) is None
+
+    with pytest.raises(ValueError):
+        parse_semantic("partly supported")
+
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+
+
+def test_template_rows_expose_model_values_and_blank_reviewer_columns() -> None:
+    payload = _payload(
+        [
+            _finding(level=3),
+            _finding(target_id="13.1", level=None, relevant=False, page=11),
+        ]
+    )
+    rows = template_rows([payload], labels=["Alpha"], paths=["alpha.json"])
+
+    assert len(rows) == 2
+    first = rows[0]
+    assert first["company"] == "Alpha"
+    assert first["year"] == 2022
+    assert first["target_id"] == "13.2"
+    assert first["page"] == 10
+    assert first["model_relevant"] == 1
+    assert first["model_level"] == 3
+    assert first["model_quote_ok"] == 1
+    assert first["model_semantic_support"] == "not_checked"
+    for field in (
+        "reviewer_relevant",
+        "reviewer_level",
+        "reviewer_quote_ok",
+        "reviewer_semantic_support",
+        "reviewer_notes",
+        "annotator",
+        "annotated_at_utc",
+    ):
+        assert first[field] == ""
+
+    second = rows[1]
+    assert second["model_level"] == ""
+    assert second["model_relevant"] == 0
+
+
+def test_template_rows_require_matching_labels_and_paths() -> None:
+    payload = _payload([_finding()])
+
+    with pytest.raises(ValueError):
+        template_rows([payload], labels=["Alpha", "Beta"])
+    with pytest.raises(ValueError):
+        template_rows([payload], paths=["a.json", "b.json"])
+
+
+def test_template_rows_use_path_stem_when_label_is_omitted() -> None:
+    rows = template_rows(
+        [_payload([_finding()])], paths=["outputs/alpha.audit.json"]
+    )
+
+    assert rows[0]["company"] == "alpha.audit"
+    assert rows[0]["annotation_id"] == "ann-alpha.audit-0001"
+
+
+def test_write_template_refuses_overwrite_unless_forced(tmp_path) -> None:
+    path = tmp_path / "gold.csv"
+    rows = template_rows([_payload([_finding()])], labels=["Alpha"])
+
+    write_template(path, rows)
+    assert read_rows(path)[0]["target_id"] == "13.2"
+
+    with pytest.raises(FileExistsError):
+        write_template(path, rows)
+
+    write_template(path, rows, force=True)
+    assert path.exists()
+
+
+def test_read_rows_rejects_missing_columns(tmp_path) -> None:
+    path = tmp_path / "bad.csv"
+    path.write_text(
+        "annotation_id,company,claim,page,quote\nann-1,Alpha,Claim,10,Quote\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing required columns"):
+        read_rows(path)
+
+
+def test_write_report_writes_json(tmp_path) -> None:
+    path = tmp_path / "nested" / "benchmark.json"
+    written = write_report(path, {"status": "no_annotations"})
+
+    assert written == path
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "status": "no_annotations"
     }
 
 
 # ---------------------------------------------------------------------------
-# Template generation
+# Scoring
 # ---------------------------------------------------------------------------
 
 
-def test_template_includes_scored_and_reviewable_findings_only() -> None:
-    payload = _payload(
-        [
-            _finding(page=10),
-            _finding(quote_verified=False, page=11),
-            _finding(relevant=False, level=None, page=12),
-        ]
-    )
-    rows = build_annotation_rows(
-        payload, audit_path="outputs/audit.json", prefix="sjs"
-    )
-
-    assert len(rows) == 2
-    assert [row["page"] for row in rows] == ["10", "11"]
-    assert rows[0]["model_level"] == "3"
-    assert rows[1]["model_level"] == ""
-    assert rows[0]["model_relevant"] == "1"
-    assert rows[0]["reviewer_relevant"] == ""
-    assert rows[0]["reviewer_level"] == ""
-    assert rows[0]["reviewer_quote_ok"] == ""
-    assert rows[0]["model_review_reason"] == ""
-    assert rows[0]["company"] == "Example Report FY2023-24"
-    assert rows[0]["reporting_year"] == "2024"
-    assert rows[0]["audit_path"] == "outputs/audit.json"
-    assert rows[0]["annotation_id"] == "sjs-0001"
-    assert set(rows[0]) == set(ANNOTATION_FIELDS)
-
-
-def test_template_can_exclude_unscored_or_include_not_relevant() -> None:
-    payload = _payload(
-        [
-            _finding(page=10),
-            _finding(quote_verified=False, page=11),
-            _finding(relevant=False, level=None, page=12),
-        ]
-    )
-
-    scored_only = build_annotation_rows(payload, include_unscored=False)
-    assert [row["page"] for row in scored_only] == ["10"]
-
-    with_negatives = build_annotation_rows(
-        payload, include_not_relevant=True
-    )
-    assert [row["page"] for row in with_negatives] == ["10", "11", "12"]
-    assert with_negatives[2]["model_relevant"] == "0"
-
-
-def test_template_requires_a_findings_list() -> None:
-    with pytest.raises(ValueError):
-        build_annotation_rows({"document": {}})
-
-
-def test_csv_round_trip_and_missing_column_validation(tmp_path) -> None:
-    rows = build_annotation_rows(_payload([_finding()]), prefix="test")
-    path = write_annotation_csv(rows, tmp_path / "gold.csv")
-    read_back = read_annotation_csv(path)
-
-    assert read_back[0]["annotation_id"] == "test-0001"
-    assert list(read_back[0]) == ANNOTATION_FIELDS
-
-    bad = tmp_path / "bad.csv"
-    bad.write_text("annotation_id,page\nx,1\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="missing required columns"):
-        read_annotation_csv(bad)
-
-
-# ---------------------------------------------------------------------------
-# Benchmark scoring
-# ---------------------------------------------------------------------------
-
-
-def test_blank_template_has_no_metrics() -> None:
-    rows = build_annotation_rows(_payload([_finding()]))
-    metrics = score_annotations(rows)
+def test_blank_reviewer_columns_report_no_annotations_and_null_metrics() -> None:
+    metrics = score_annotations([_row()])
 
     assert metrics["status"] == "no_annotations"
     assert metrics["rows_total"] == 1
@@ -195,112 +262,28 @@ def test_blank_template_has_no_metrics() -> None:
     assert metrics["rubric"] is None
     assert metrics["quote_verification"] is None
     assert metrics["semantic_support"] is None
-    assert metrics["skipped"]["missing_relevance"] == 1
-    assert metrics["skipped"]["missing_levels"] == 1
-    assert metrics["skipped"]["missing_quote"] == 1
 
 
-def test_filled_annotations_produce_relevance_and_rubric_metrics() -> None:
-    rows = [
-        _row(reviewer_relevant="1", reviewer_level="4", model_level="4",
-             reviewer_quote_ok="1"),
-        _row(reviewer_relevant="1", reviewer_level="3", model_level="3",
-             reviewer_quote_ok="1"),
-        _row(reviewer_relevant="0", reviewer_level="2", model_level="2",
-             reviewer_quote_ok="1"),
-        _row(reviewer_relevant="0", reviewer_level="", model_level="",
-             reviewer_quote_ok="0", model_quote_verified="0",
-             model_relevant="0"),
-    ]
-    metrics = score_annotations(rows)
-
-    assert metrics["status"] == "ok"
-    assert metrics["pairs"] == {
-        "relevance": 4,
-        "rubric": 3,
-        "quote_verification": 4,
-        "semantic_support": 0,
-    }
-
-    relevance = metrics["relevance"]
-    assert relevance["tp"] == 2
-    assert relevance["fp"] == 1
-    assert relevance["tn"] == 1
-    assert relevance["fn"] == 0
-    assert relevance["accuracy"] == 0.75
-
-    rubric = metrics["rubric"]
-    assert rubric["exact_agreement"] == 1.0
-    assert rubric["within_one_agreement"] == 1.0
-    assert rubric["quadratic_weighted_kappa"] == 1.0
-    assert metrics["level_counts"]["reviewer"]["4"] == 1
-    assert metrics["level_counts"]["reviewer"]["3"] == 1
-    assert metrics["level_counts"]["reviewer"]["2"] == 1
-    assert metrics["level_counts"]["model"]["4"] == 1
-
-    assert metrics["quote_verification"]["accuracy"] == 1.0
-
-
-def test_partial_annotations_report_only_available_metrics() -> None:
-    metrics = score_annotations([_row(reviewer_relevant="1")])
-
-    assert metrics["status"] == "ok"
-    assert metrics["relevance"] is not None
-    assert metrics["rubric"] is None
-    assert metrics["quote_verification"] is None
-
-
-def test_semantic_support_agreement_uses_categorical_labels() -> None:
-    rows = [
-        _row(
-            reviewer_semantic_support="supported",
-            model_semantic_support="supported",
-        ),
-        _row(
-            reviewer_semantic_support="uncertain",
-            model_semantic_support="supported",
-        ),
-        _row(
-            reviewer_semantic_support="not_supported",
-            model_semantic_support="not_checked",
-        ),
-    ]
-    metrics = score_annotations(rows)
-
-    assert metrics["status"] == "ok"
-    assert metrics["pairs"]["semantic_support"] == 2
-    assert metrics["skipped"]["missing_semantic"] == 1
-    assert metrics["relevance"] is None
-    assert metrics["semantic_support"]["n"] == 2
-    assert metrics["semantic_support"]["observed_agreement"] == 0.5
-    assert metrics["semantic_support"]["labels"] == [
-        "supported",
-        "uncertain",
-        "not_supported",
-    ]
-    assert metrics["semantic_support"]["confusion_matrix"] == [
-        [1, 0, 0],
-        [1, 0, 0],
-        [0, 0, 0],
-    ]
-
-
-def test_invalid_values_are_skipped_not_coerced() -> None:
+def test_invalid_reviewer_values_report_invalid_annotations() -> None:
     metrics = score_annotations(
-        [
-            _row(
-                reviewer_relevant="maybe",
-                reviewer_level="9",
-                reviewer_quote_ok="2",
-                reviewer_semantic_support="probably",
-            )
-        ]
+        [_row(reviewer_relevant="maybe", reviewer_level="3.7")]
     )
 
     assert metrics["status"] == "invalid_annotations"
     assert metrics["skipped"]["invalid_values"] == 1
+    assert metrics["reviewer_values_present"] == 0
     assert metrics["relevance"] is None
     assert metrics["rubric"] is None
+
+
+def test_fractional_rubric_level_is_not_truncated() -> None:
+    metrics = score_annotations(
+        [_row(reviewer_relevant="1", reviewer_level="3.7", reviewer_quote_ok="1")]
+    )
+
+    assert metrics["skipped"]["invalid_values"] == 1
+    assert metrics["rubric"] is None
+    assert metrics["pairs"]["rubric"] == 0
 
 
 def test_reviewer_labels_without_model_values_report_no_pairs() -> None:
@@ -319,28 +302,127 @@ def test_reviewer_labels_without_model_values_report_no_pairs() -> None:
     assert metrics["semantic_support"] is None
 
 
-def test_yes_no_labels_are_accepted() -> None:
-    metrics = score_annotations(
-        [_row(reviewer_relevant="yes", reviewer_quote_ok="no")]
-    )
-    assert metrics["relevance"]["n"] == 1
-    assert metrics["quote_verification"]["fp"] == 1
+def test_partial_annotation_pairs_only_available_metrics() -> None:
+    metrics = score_annotations([_row(reviewer_relevant="1")])
+
+    assert metrics["status"] == "ok"
+    assert metrics["pairs"]["relevance"] == 1
+    assert metrics["pairs"]["rubric"] == 0
+    assert metrics["skipped"]["missing_levels"] == 0
+    assert metrics["relevance"]["accuracy"] == 1.0
+    assert metrics["rubric"] is None
 
 
-def test_fractional_rubric_level_is_not_truncated() -> None:
+def test_full_annotations_report_agreement_metrics() -> None:
+    rows = [
+        _row(
+            reviewer_relevant="1",
+            reviewer_level="3",
+            reviewer_quote_ok="1",
+            reviewer_semantic_support="supported",
+        ),
+        _row(
+            annotation_id="ann-0002",
+            reviewer_relevant="0",
+            reviewer_level="2",
+            reviewer_quote_ok="0",
+            reviewer_semantic_support="uncertain",
+            model_relevant="0",
+            model_level="3",
+            model_quote_ok="1",
+            model_semantic_support="uncertain",
+        ),
+        _row(
+            annotation_id="ann-0003",
+            reviewer_relevant="1",
+            reviewer_level="4",
+            reviewer_quote_ok="1",
+            reviewer_semantic_support="supported",
+            model_relevant="0",
+            model_level="4",
+            model_quote_ok="0",
+            model_semantic_support="uncertain",
+        ),
+    ]
+    metrics = score_annotations(rows)
+
+    assert metrics["status"] == "ok"
+    assert metrics["reviewer_values_present"] == 12
+    assert metrics["pairs"] == {
+        "relevance": 3,
+        "rubric": 3,
+        "quote_verification": 3,
+        "semantic_support": 2,
+    }
+
+    relevance = metrics["relevance"]
+    assert relevance["tp"] == 1
+    assert relevance["tn"] == 1
+    assert relevance["fn"] == 1
+    assert relevance["fp"] == 0
+    assert relevance["precision"] == 1.0
+    assert relevance["recall"] == 0.5
+    assert relevance["accuracy"] == pytest.approx(2 / 3)
+    assert relevance["confusion"]["matrix"] == [[1, 0], [1, 1]]
+
+    quote = metrics["quote_verification"]
+    assert quote["accuracy"] == pytest.approx(1 / 3)
+    assert quote["precision"] == 0.5
+    assert quote["recall"] == 0.5
+
+    rubric = metrics["rubric"]
+    assert rubric["n"] == 3
+    assert rubric["exact_agreement"] == pytest.approx(2 / 3)
+    assert rubric["within_one"] == 1.0
+
+    semantic = metrics["semantic_support"]
+    assert semantic["n"] == 2
+    assert semantic["agreement"] == 0.5
+    assert semantic["confusion"]["labels"] == [
+        "supported",
+        "uncertain",
+        "not_supported",
+    ]
+
+
+def test_invalid_model_values_are_counted_separately() -> None:
     metrics = score_annotations(
         [
             _row(
+                reviewer_level="3",
+                model_level="not-a-level",
                 reviewer_relevant="1",
-                reviewer_level="3.7",
-                reviewer_quote_ok="1",
             )
         ]
     )
 
-    assert metrics["skipped"]["invalid_values"] == 1
+    assert metrics["skipped"]["invalid_model_values"] == 1
+    assert metrics["skipped"]["missing_levels"] == 1
     assert metrics["rubric"] is None
-    assert metrics["pairs"]["rubric"] == 0
+    assert metrics["pairs"]["relevance"] == 1
+
+
+def test_score_csv_reads_and_scores_a_file(tmp_path) -> None:
+    path = tmp_path / "gold.csv"
+    rows = [
+        _row(
+            reviewer_relevant="1",
+            reviewer_level="3",
+            reviewer_quote_ok="1",
+            reviewer_semantic_support="supported",
+            model_semantic_support="supported",
+        )
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=BENCHMARK_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    metrics = score_csv(path)
+
+    assert metrics["status"] == "ok"
+    assert metrics["relevance"]["accuracy"] == 1.0
+    assert metrics["semantic_support"]["agreement"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -348,82 +430,38 @@ def test_fractional_rubric_level_is_not_truncated() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run(script: str, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, str(PROJECT_ROOT / "eval" / script), *args],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=120,
+def _load_script(name: str):
+    spec = importlib.util.spec_from_file_location(
+        f"prism17_eval_{name}", ROOT / "eval" / f"{name}.py"
     )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def test_make_template_script_and_overwrite_guard(tmp_path) -> None:
-    audit = tmp_path / "audit.json"
-    audit.write_text(json.dumps(_payload([_finding()])), encoding="utf-8")
-    out = tmp_path / "template.csv"
-
-    first = _run("make_gold_template.py", str(audit), "--out", str(out))
-    assert first.returncode == 0, first.stderr
-    assert "contains no gold labels" in first.stdout
-    assert out.exists()
-
-    blocked = _run("make_gold_template.py", str(audit), "--out", str(out))
-    assert blocked.returncode == 2
-    assert "already exists" in blocked.stderr
-
-    forced = _run(
-        "make_gold_template.py", str(audit), "--out", str(out), "--force"
+def test_make_template_and_score_benchmark_clis(tmp_path, capsys) -> None:
+    audit = tmp_path / "alpha.audit.json"
+    audit.write_text(
+        json.dumps(_payload([_finding(level=3)])), encoding="utf-8"
     )
-    assert forced.returncode == 0
+    gold = tmp_path / "gold.csv"
+    report = tmp_path / "benchmark.json"
 
+    template_cli = _load_script("make_gold_template")
+    assert template_cli.main([str(audit), "--out", str(gold)]) == 0
+    assert read_rows(gold)[0]["reviewer_relevant"] == ""
 
-def test_score_benchmark_script_reports_no_annotations_then_metrics(
-    tmp_path,
-) -> None:
-    audit = tmp_path / "audit.json"
-    audit.write_text(json.dumps(_payload([_finding()])), encoding="utf-8")
-    template = tmp_path / "annotations.csv"
-    assert (
-        _run("make_gold_template.py", str(audit), "--out", str(template))
-        .returncode
-        == 0
-    )
+    # The guard prevents an accidental overwrite of an existing gold file.
+    assert template_cli.main([str(audit), "--out", str(gold)]) == 1
 
-    report_path = tmp_path / "benchmark.json"
-    blank = _run(
-        "score_benchmark.py",
-        str(template),
-        "--out",
-        str(report_path),
-    )
-    assert blank.returncode == 0, blank.stderr
-    assert "no metrics were computed" in blank.stdout
-    payload = json.loads(report_path.read_text(encoding="utf-8"))
-    assert payload["metrics"]["status"] == "no_annotations"
-    assert payload["metrics"]["rubric"] is None
-    assert payload["provenance"]["files"]["gold"]["sha256"]
+    score_cli = _load_script("score_benchmark")
+    assert score_cli.main([str(gold), "--out", str(report)]) == 0
 
-    with template.open("r", encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    rows[0]["reviewer_relevant"] = "1"
-    rows[0]["reviewer_level"] = "3"
-    rows[0]["reviewer_quote_ok"] = "1"
-    with template.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=ANNOTATION_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
+    document = json.loads(report.read_text(encoding="utf-8"))
+    assert document["metrics"]["status"] == "no_annotations"
+    assert document["metrics"]["relevance"] is None
+    assert document["provenance"]["dataset"]["version"] == "0.1"
 
-    filled = _run(
-        "score_benchmark.py",
-        str(template),
-        "--out",
-        str(report_path),
-        "--notes",
-        "single annotator smoke test",
-    )
-    assert filled.returncode == 0, filled.stderr
-    payload = json.loads(report_path.read_text(encoding="utf-8"))
-    assert payload["metrics"]["status"] == "ok"
-    assert payload["metrics"]["rubric"]["exact_agreement"] == 1.0
-    assert "single annotator smoke test" in payload["provenance"]["notes"]
+    output = capsys.readouterr().out
+    assert "No reviewer annotations found" in output

@@ -22,6 +22,7 @@ def _finding(
     page: int = 10,
     goal: int = 12,
     quote_verified: bool = True,
+    dimensions: dict[str, bool] | None = None,
 ) -> VerifiedFinding:
     candidate = Candidate(
         passage_id=f"p{page:04d}-001",
@@ -39,7 +40,7 @@ def _finding(
         sdg_target=target_id,
         claim="Example claim.",
         supporting_quote="Example quote with enough words to verify.",
-        dimensions=dict(DIMENSIONS),
+        dimensions=dict(DIMENSIONS if dimensions is None else dimensions),
         scored=True,
     )
     return VerifiedFinding(
@@ -126,3 +127,84 @@ def test_build_coverage_falls_back_to_finding_goals() -> None:
 def test_target_sort_key_orders_numerically() -> None:
     assert target_sort_key("12.2") < target_sort_key("12.10")
     assert target_sort_key("12.10") < target_sort_key("12.a")
+
+
+def test_evidence_matrix_counts_dimensions_per_goal() -> None:
+    partial = {
+        "specificity": True,
+        "measurable_indicator": False,
+        "deadline": False,
+        "baseline": False,
+        "reported_progress": False,
+    }
+    findings = [
+        _finding("12.5", 4, page=10),
+        _finding("12.6", 2, page=11, dimensions=partial),
+    ]
+
+    summary = build_coverage(findings, load_config(), focus_goals=[12])
+    goal = summary.goals[0]
+    dimensions = {item.key: item for item in goal.dimensions}
+
+    assert goal.finding_count == 2
+    assert set(dimensions) == {
+        "specificity",
+        "measurable_indicator",
+        "deadline",
+        "baseline",
+        "reported_progress",
+    }
+    assert dimensions["specificity"].label == "Specificity"
+    assert dimensions["specificity"].disclosed == 2
+    assert dimensions["specificity"].findings == 2
+    assert dimensions["specificity"].share == 1.0
+    assert dimensions["specificity"].text() == "2/2 (100%)"
+    assert dimensions["baseline"].disclosed == 1
+    assert dimensions["baseline"].text() == "1/2 (50%)"
+
+    totals = {item.key: item for item in summary.dimension_totals}
+    assert totals["specificity"].disclosed == 2
+    assert totals["deadline"].disclosed == 1
+    assert totals["deadline"].findings == 2
+
+
+def test_evidence_matrix_empty_goal_has_no_share() -> None:
+    summary = build_coverage(
+        [_finding("8.8", 2, goal=8)], load_config(), focus_goals=[8, 12]
+    )
+    empty = next(goal for goal in summary.goals if goal.goal == 12)
+
+    assert empty.finding_count == 0
+    for dimension in empty.dimensions:
+        assert dimension.disclosed == 0
+        assert dimension.findings == 0
+        assert dimension.share is None
+        assert dimension.text() == "-"
+
+    totals = {item.key: item for item in summary.dimension_totals}
+    assert totals["specificity"].findings == 1
+    assert totals["specificity"].share == 1.0
+
+
+def test_evidence_matrix_is_serialized() -> None:
+    summary = build_coverage(
+        [_finding("12.5", 2)], load_config(), focus_goals=[12]
+    )
+    payload = summary.to_dict()
+
+    goal_dimensions = payload["goals"][0]["dimensions"]
+    assert [item["key"] for item in goal_dimensions] == [
+        "specificity",
+        "measurable_indicator",
+        "deadline",
+        "baseline",
+        "reported_progress",
+    ]
+    assert goal_dimensions[0]["disclosed"] == 1
+    assert goal_dimensions[0]["findings"] == 1
+    assert goal_dimensions[0]["share"] == 1.0
+
+    totals = payload["dimension_totals"]
+    assert len(totals) == 5
+    assert totals[0]["label"] == "Specificity"
+    assert totals[4]["label"] == "Reported progress"

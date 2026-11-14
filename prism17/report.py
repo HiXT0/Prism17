@@ -24,14 +24,11 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 from .config import get, load_config, resolve_path
 from .coverage import (
-    DIMENSION_LABELS,
-    FLAG_TEXT,
-    CoverageMatrix,
+    EVIDENCE_DIMENSIONS,
     CoverageSummary,
     GoalCoverage,
     TargetCoverage,
     build_coverage,
-    build_coverage_matrix,
     target_sort_key,
 )
 from .guidance import (
@@ -94,10 +91,8 @@ METHOD_ITEMS = (
         "Verification",
         "Stage 1 checks that each quote exists on the cited page, after "
         "whitespace and hyphenation normalisation, with a fuzzy fallback. "
-        "When enabled, Stage 2 checks semantic support with a local NLI "
-        "model and a deterministic consistency guard for negation, years, "
-        "numbers, units and commitment status. Uncertain support is left "
-        "unscored for human review.",
+        "Stage 2 semantic support is optional and off by default; when it is "
+        "enabled, an ambiguous result keeps the finding unscored.",
     ),
     (
         "Rubric",
@@ -122,7 +117,6 @@ class ReportData:
     stats: dict[str, Any]
     coverage: CoverageSummary
     findings: list[VerifiedFinding]
-    coverage_matrix: CoverageMatrix = field(default_factory=CoverageMatrix)
     focus_goals: list[int] = field(default_factory=list)
     company_name: str | None = None
     report_title: str = DEFAULT_TITLE
@@ -202,7 +196,6 @@ def build_report_data(
         stats=result.stats(),
         coverage=build_coverage(result.scored, cfg, focus_goals),
         findings=findings,
-        coverage_matrix=build_coverage_matrix(findings),
         focus_goals=focus_goals,
         company_name=get(cfg, "report", "company_name", default=None),
         report_title=str(get(cfg, "report", "report_title", default=DEFAULT_TITLE)),
@@ -244,7 +237,6 @@ def report_data_from_json(
             focus_goals,
         ),
         findings=findings,
-        coverage_matrix=build_coverage_matrix(findings),
         focus_goals=focus_goals,
         company_name=get(cfg, "report", "company_name", default=None),
         report_title=str(get(cfg, "report", "report_title", default=DEFAULT_TITLE)),
@@ -318,6 +310,41 @@ def _level_counts_text(stats: dict[str, Any]) -> str:
     )
 
 
+EVIDENCE_MATRIX_NOTE = (
+    "Counts show how many scored findings disclose each of the five rubric "
+    "dimensions. The flags come from the judge and describe disclosure in this "
+    "run, not real-world performance. A low count is a disclosure observation, "
+    "not evidence that the company does nothing."
+)
+
+
+def _evidence_matrix_headers() -> tuple[str, ...]:
+    return ("Goal", "Scored findings") + tuple(
+        label for _, label in EVIDENCE_DIMENSIONS
+    )
+
+
+def _evidence_matrix_rows(
+    coverage: CoverageSummary,
+) -> list[tuple[Any, ...]]:
+    rows: list[tuple[Any, ...]] = [
+        (
+            f"Goal {goal.goal}",
+            goal.finding_count,
+            *(item.text() for item in goal.dimensions),
+        )
+        for goal in coverage.goals
+    ]
+    rows.append(
+        (
+            "All focus goals",
+            sum(goal.finding_count for goal in coverage.goals),
+            *(item.text() for item in coverage.dimension_totals),
+        )
+    )
+    return rows
+
+
 def _review_summary_text(summary: Any) -> str:
     if summary.total == 0:
         return "No scored findings"
@@ -356,61 +383,6 @@ def _md_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> list[str
     for row in rows:
         lines.append("| " + " | ".join(_md_cell(cell) for cell in row) + " |")
     return lines
-
-
-_MATRIX_CELL = {
-    "present": "present",
-    "absent": "absent",
-    "not_assessable": "n/a",
-}
-
-
-def _render_markdown_matrix(
-    lines: list[str],
-    matrix: CoverageMatrix,
-) -> None:
-    lines.append("## Evidence coverage matrix")
-    lines.append("")
-    if not matrix.claims:
-        lines.append("No reviewed claims were available for the evidence matrix.")
-        lines.append("")
-        return
-
-    lines.append(
-        "Each row is one reviewed claim. **Absent** means the judge did not "
-        "identify that dimension in the verified quote; it is a disclosure gap, "
-        "not evidence that the company does nothing. **n/a** means the claim "
-        "could not be assessed and needs human review."
-    )
-    lines.append("")
-
-    counts = matrix.dimension_counts()
-    lines.append("**Dimension summary**")
-    lines.append("")
-    for key, label in DIMENSION_LABELS.items():
-        values = counts[key]
-        lines.append(
-            f"- {label}: {values['present']} present, "
-            f"{values['absent']} absent, {values['not_assessable']} n/a"
-        )
-    lines.append("")
-
-    headers = ["Target", "Page", "Level", *DIMENSION_LABELS.values(), "Flags"]
-    rows = [
-        (
-            claim.target_id,
-            claim.page,
-            _level_text(claim.level),
-            *(
-                _MATRIX_CELL.get(claim.dimensions.get(key, "not_assessable"), "n/a")
-                for key in DIMENSION_LABELS
-            ),
-            "; ".join(FLAG_TEXT.get(flag, flag) for flag in claim.flags) or "none",
-        )
-        for claim in matrix.claims
-    ]
-    lines.extend(_md_table(headers, rows))
-    lines.append("")
 
 
 def render_markdown(data: ReportData) -> str:
@@ -497,7 +469,22 @@ def render_markdown(data: ReportData) -> str:
         lines.append("No focus goals were available for coverage accounting.")
     lines.append("")
 
-    _render_markdown_matrix(lines, data.coverage_matrix)
+    lines.append("## Evidence coverage matrix")
+    lines.append("")
+    lines.append(EVIDENCE_MATRIX_NOTE)
+    lines.append("")
+    if data.coverage.goals:
+        lines.extend(
+            _md_table(
+                _evidence_matrix_headers(),
+                _evidence_matrix_rows(data.coverage),
+            )
+        )
+    else:
+        lines.append(
+            "No scored findings were available for dimension accounting."
+        )
+    lines.append("")
 
     lines.append("## Scored findings")
     lines.append("")
@@ -783,62 +770,6 @@ def _level_badge(level: int | None) -> str:
     return f'<span class="badge level-{level}">Level {level}</span>'
 
 
-def _render_html_matrix(parts: list[str], matrix: CoverageMatrix) -> None:
-    parts.append("<h2>Evidence coverage matrix</h2>")
-    if not matrix.claims:
-        parts.append(
-            "<p>No reviewed claims were available for the evidence matrix.</p>"
-        )
-        return
-
-    parts.append(
-        "<p>Each row is one reviewed claim. <strong>Absent</strong> means the "
-        "judge did not identify that dimension in the verified quote; it is a "
-        "disclosure gap, not evidence that the company does nothing. "
-        "<strong>n/a</strong> means the claim could not be assessed and needs "
-        "human review.</p>"
-    )
-    counts = matrix.dimension_counts()
-    summary_rows = [
-        (
-            label,
-            counts[key]["present"],
-            counts[key]["absent"],
-            counts[key]["not_assessable"],
-        )
-        for key, label in DIMENSION_LABELS.items()
-    ]
-    parts.append(
-        _html_table(
-            ("Dimension", "Present", "Absent", "n/a"),
-            summary_rows,
-        )
-    )
-    parts.append(
-        _html_table(
-            ("Target", "Page", "Level", *DIMENSION_LABELS.values(), "Flags"),
-            [
-                (
-                    claim.target_id,
-                    claim.page,
-                    _level_text(claim.level),
-                    *(
-                        _MATRIX_CELL.get(
-                            claim.dimensions.get(key, "not_assessable"), "n/a"
-                        )
-                        for key in DIMENSION_LABELS
-                    ),
-                    "; ".join(
-                        FLAG_TEXT.get(flag, flag) for flag in claim.flags
-                    )
-                    or "none",
-                )
-                for claim in matrix.claims
-            ],
-        )
-    )
-
-
 def render_html(data: ReportData) -> str:
     """Render the full report as a standalone HTML document."""
     parts: list[str] = [
@@ -942,7 +873,20 @@ def render_html(data: ReportData) -> str:
             "<p>No focus goals were available for coverage accounting.</p>"
         )
 
-    _render_html_matrix(parts, data.coverage_matrix)
+    parts.append("<h2>Evidence coverage matrix</h2>")
+    parts.append(f"<p>{_e(EVIDENCE_MATRIX_NOTE)}</p>")
+    if data.coverage.goals:
+        parts.append(
+            _html_table(
+                _evidence_matrix_headers(),
+                _evidence_matrix_rows(data.coverage),
+            )
+        )
+    else:
+        parts.append(
+            "<p>No scored findings were available for dimension "
+            "accounting.</p>"
+        )
 
     parts.append("<h2>Scored findings</h2>")
     if not data.scored:

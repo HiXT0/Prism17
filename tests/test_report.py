@@ -277,6 +277,49 @@ def test_pending_decisions_do_not_render_a_review_table() -> None:
     assert "Not reviewed (1 pending)" in markdown
 
 
+def test_reports_include_the_evidence_coverage_matrix() -> None:
+    data = build_report_data(_result([_finding()]))
+
+    markdown = render_markdown(data)
+    html_text = render_html(data)
+
+    assert "## Evidence coverage matrix" in markdown
+    assert (
+        "| Goal 12 | 1 | 1/1 (100%) | 1/1 (100%) | 0/1 (0%) | 0/1 (0%) "
+        "| 0/1 (0%) |"
+    ) in markdown
+    assert "| All focus goals | 1 | 1/1 (100%)" in markdown
+    assert "a disclosure observation, not evidence" in markdown
+
+    assert "<h2>Evidence coverage matrix</h2>" in html_text
+    assert "<th>Specificity</th>" in html_text
+    assert "<th>Measurable indicator</th>" in html_text
+    assert "<th>Reported progress</th>" in html_text
+    assert "0/1 (0%)" in html_text
+    assert "All focus goals" in html_text
+
+
+def test_evidence_matrix_without_focus_goals_renders_a_message() -> None:
+    config = _config()
+    config["report"]["focus_sdgs"] = []
+    data = report_data_from_json(
+        {
+            "document": {"title": "Empty", "page_count": 1},
+            "settings": {"focus_sdgs": []},
+            "stats": {},
+            "findings": [],
+        },
+        config,
+    )
+
+    assert "No scored findings were available for dimension accounting." in (
+        render_markdown(data)
+    )
+    assert "No scored findings were available for dimension accounting." in (
+        render_html(data)
+    )
+
+
 def test_report_cli_overlays_review_decisions(tmp_path) -> None:
     from prism17.report import main as report_main
 

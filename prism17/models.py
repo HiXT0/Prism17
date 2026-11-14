@@ -96,19 +96,14 @@ class VerifiedFinding:
 
     @property
     def is_scored(self) -> bool:
-        """Only verified, relevant findings with a rubric level are ever scored.
-
-        Stage 2 semantic support can veto a finding, but ``not_checked`` does
-        not: a laptop without the optional NLI model still produces the same
-        Stage 1 audit as before.
-        """
+        """Only verified, relevant findings with a rubric level are ever scored."""
         return (
             self.judged.relevant
             and self.judged.scored
             and self.quote_verified
+            and self.semantic_support not in {"not_supported", "uncertain"}
             and self.level is not None
             and self.review_reason is None
-            and self.semantic_support not in {"not_supported", "uncertain"}
         )
 
     def to_dict(self) -> dict[str, Any]:

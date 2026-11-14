@@ -1,0 +1,12 @@
+report_id,company,year,sector,source_url,split
+sjs_india_brsr_fy2023_24,S.J.S. Enterprises,FY2023-24,Auto components,,dev
+srf_fy2024_25,SRF,FY2024-25,Chemicals,,dev
+tata_projects_fy2024_25,Tata Projects,FY2024-25,Construction,,dev
+nocil_fy2024_25,NOCIL,FY2024-25,Chemicals,,test
+nhpc_fy2024_25,NHPC,FY2024-25,Power,,test
+oberoi_fy2024_25,Oberoi Realty,FY2024-25,Real estate,,test
+ujjivan_fy2022_23,Ujjivan SFB,FY2022-23,Banking,,test
+ujjivan_fy2023_24,Ujjivan SFB,FY2023-24,Banking,,test
+ujjivan_fy2024_25,Ujjivan SFB,FY2024-25,Banking,,test
+ujjivan_fy2025_26,Ujjivan SFB,FY2025-26,Banking,,test
+birlasoft_fy2024_25,Birlasoft,FY2024-25,IT services,,excluded

@@ -18,6 +18,7 @@ from prism17.review import finding_key, make_decision
 from prism17.ui import (
     _decisions_from_frame,
     _default_review_path,
+    _dimension_cells,
     _level_text,
     _review_dataframe,
     _short,
@@ -106,6 +107,31 @@ def test_level_text_handles_missing_and_present() -> None:
     assert _level_text(None) == "—"
     assert _level_text("") == "—"
     assert _level_text(3) == "Level 3"
+
+
+def test_dimension_cells_follow_the_fixed_matrix_order() -> None:
+    data = _data([_finding()])
+
+    cells = _dimension_cells(data.coverage.goals[0].dimensions)
+
+    assert list(cells) == [
+        "Specificity",
+        "Measurable indicator",
+        "Deadline",
+        "Baseline",
+        "Reported progress",
+    ]
+    assert cells["Specificity"] == "1/1 (100%)"
+    assert cells["Measurable indicator"] == "1/1 (100%)"
+    assert cells["Deadline"] == "0/1 (0%)"
+
+
+def test_dimension_cells_use_a_dash_without_scored_findings() -> None:
+    data = _data([])
+
+    cells = _dimension_cells(data.coverage.goals[0].dimensions)
+
+    assert set(cells.values()) == {"-"}
 
 
 def test_short_squashes_and_truncates() -> None:

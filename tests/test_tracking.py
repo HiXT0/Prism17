@@ -1,4 +1,4 @@
-"""Tests for narrow multi-year target tracking."""
+"""Tests for narrow multi-year tracking."""
 
 from __future__ import annotations
 
@@ -10,57 +10,63 @@ from prism17.models import Candidate, JudgedFinding, VerifiedFinding
 from prism17.tracking import (
     TRACKING_STATUS_TEXT,
     build_tracking,
-    infer_direction,
-    infer_reporting_year,
     main,
     normalise_unit,
     render_markdown,
     track_payloads,
 )
 
-CONFIG = {"tracking": {"min_level": 3, "require_same_unit": True}}
+CONFIG = {
+    "tracking": {
+        "min_level": 3,
+        "require_same_unit": True,
+    }
+}
 
 
 def _finding(
-    target_id: str = "13.2",
     *,
-    level: int = 3,
-    value: str = "",
-    unit: str = "",
-    year: str = "",
-    status: str = "reported",
-    baseline: str = "",
+    target_id: str = "13.2",
+    goal: int = 13,
+    target_text: str = "Reduce emissions by 2030.",
+    value: str = "100",
+    unit: str = "tCO2e",
+    quote: str | None = None,
+    level: int | None = 3,
     page: int = 10,
-    quote: str = "Example quantified disclosure text.",
-    claim: str = "Example claim.",
-    target_text: str = "Reduce emissions.",
     confidence: float = 0.9,
-    passage_id: str | None = None,
+    baseline: str = "",
+    relevant: bool = True,
     quote_verified: bool = True,
     semantic_support: str = "not_checked",
+    review_reason: str | None = None,
+    passage_id: str | None = None,
 ) -> VerifiedFinding:
+    if quote is None:
+        suffix = f" {unit}" if unit else ""
+        quote = f"Emissions were reported at {value}{suffix} this year."
     candidate = Candidate(
         passage_id=passage_id or f"p{page:04d}-001",
         page=page,
         target_id=target_id,
-        target_goal=int(target_id.split(".", 1)[0]),
+        target_goal=goal,
         target_text=target_text,
-        score=0.8,
+        score=0.9,
         passage_text=quote,
     )
     judged = JudgedFinding(
         candidate=candidate,
-        relevant=True,
-        sdg_goal=int(target_id.split(".", 1)[0]),
+        relevant=relevant,
+        sdg_goal=goal,
         sdg_target=target_id,
-        claim=claim,
+        claim=f"Emissions were {value} {unit}.".strip(),
         supporting_quote=quote,
-        dimensions={"specificity": True},
+        dimensions={"specificity": True, "measurable_indicator": True},
         extracted={
             "value": value,
             "unit": unit,
-            "year": year,
-            "status": status,
+            "year": "2022",
+            "status": "reported",
             "baseline": baseline,
         },
         confidence=confidence,
@@ -71,13 +77,18 @@ def _finding(
         quote_method="page_exact" if quote_verified else None,
         quote_score=100.0 if quote_verified else 0.0,
         source_page=page,
-        level=level if quote_verified else None,
         semantic_support=semantic_support,
+        level=level,
+        review_reason=review_reason,
     )
 
 
-def _record(report, status: str):
-    return next(record for record in report.records if record.status == status)
+def _payload(title: str, findings: list[VerifiedFinding]) -> dict:
+    return {
+        "schema_version": "0.1",
+        "document": {"title": title, "pages": 20},
+        "findings": [finding.to_dict() for finding in findings],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -86,29 +97,12 @@ def _record(report, status: str):
 
 
 def test_unit_normalisation_handles_common_aliases() -> None:
-    assert normalise_unit("MTCO2e") == "tco2e"
+    assert normalise_unit("MTCO2e") == "mtco2e"
     assert normalise_unit("ktCO2e") == "ktco2e"
     assert normalise_unit("Tonnes") == "t"
     assert normalise_unit(" per cent ") == "%"
+    assert normalise_unit("million tonnes") == "million t"
     assert normalise_unit("") == ""
-
-
-def test_value_falls_back_to_the_verified_quote() -> None:
-    earlier = _finding(
-        value="",
-        unit="",
-        quote="We cut waste to 25 tonnes in the reporting year.",
-        target_text="Reduce waste.",
-    )
-    later = _finding(value="20", unit="t", quote="Waste was 20 tonnes.")
-    report = build_tracking([earlier], [later], CONFIG)
-
-    record = report.records[0]
-    assert record.earlier is not None
-    assert record.earlier.value == 25.0
-    assert record.earlier.unit == "t"
-    assert record.status == "progressing"
-    assert record.change == -5.0
 
 
 # ---------------------------------------------------------------------------
@@ -116,71 +110,126 @@ def test_value_falls_back_to_the_verified_quote() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_progressing_when_value_moves_in_favourable_direction() -> None:
-    earlier = _finding(value="100", unit="tCO2e", target_text="Reduce emissions.")
-    later = _finding(value="80", unit="tCO2e", target_text="Reduce emissions.")
-    report = build_tracking([earlier], [later], CONFIG)
+def test_progressing_when_value_falls_for_reduction_target() -> None:
+    report = build_tracking(
+        [_finding(value="100")], [_finding(value="80")], CONFIG
+    )
 
     record = report.records[0]
     assert record.status == "progressing"
-    assert record.direction == "decrease"
     assert record.change == -20.0
-    assert record.change_percent == -20.0
-    assert "favourable direction" in record.reason
+    assert record.change_pct == -20.0
+    assert record.direction == "decrease"
+    assert report.counts()["progressing"] == 1
 
 
-def test_changed_when_value_moves_against_favourable_direction() -> None:
-    earlier = _finding(value="100", unit="tCO2e", target_text="Reduce emissions.")
-    later = _finding(value="120", unit="tCO2e", target_text="Reduce emissions.")
-    report = build_tracking([earlier], [later], CONFIG)
+def test_progressing_when_value_rises_for_increase_target() -> None:
+    report = build_tracking(
+        [
+            _finding(
+                target_id="7.2",
+                goal=7,
+                target_text="Increase the share of renewable energy.",
+                value="10",
+                unit="%",
+            )
+        ],
+        [
+            _finding(
+                target_id="7.2",
+                goal=7,
+                target_text="Increase the share of renewable energy.",
+                value="20",
+                unit="%",
+            )
+        ],
+        CONFIG,
+    )
 
-    record = report.records[0]
-    assert record.status == "changed"
-    assert record.change == 20.0
-    assert "against the favourable direction" in record.reason
+    assert report.records[0].status == "progressing"
+    assert report.records[0].direction == "increase"
 
 
-def test_unchanged_when_value_is_the_same_within_tolerance() -> None:
-    earlier = _finding(value="100", unit="tCO2e")
-    later = _finding(value="100.0", unit="tCO2e")
-    report = build_tracking([earlier], [later], CONFIG)
+def test_unchanged_when_values_are_equal() -> None:
+    report = build_tracking(
+        [_finding(value="100")], [_finding(value="100")], CONFIG
+    )
 
     record = report.records[0]
     assert record.status == "unchanged"
     assert record.change == 0.0
+    assert record.direction is None
 
 
-def test_changed_when_favourable_direction_is_unknown() -> None:
-    earlier = _finding(
-        value="10",
-        unit="units",
-        target_text="Our approach to water.",
-        claim="Our approach to water.",
-        quote="Our approach to water.",
+def test_changed_when_direction_is_unclear_or_unfavourable() -> None:
+    unclear = build_tracking(
+        [
+            _finding(
+                target_text="Integrate climate measures into policy.",
+                value="100",
+            )
+        ],
+        [
+            _finding(
+                target_text="Integrate climate measures into policy.",
+                value="80",
+            )
+        ],
+        CONFIG,
     )
-    later = _finding(
-        value="20",
-        unit="units",
-        target_text="Our approach to water.",
-        claim="Our approach to water.",
-        quote="Our approach to water.",
+    assert unclear.records[0].status == "changed"
+    assert "clear favourable direction" in unclear.records[0].reason
+
+    unfavourable = build_tracking(
+        [
+            _finding(
+                target_text="Increase the share of renewable energy.",
+                value="10",
+                unit="%",
+            )
+        ],
+        [
+            _finding(
+                target_text="Increase the share of renewable energy.",
+                value="5",
+                unit="%",
+            )
+        ],
+        CONFIG,
     )
+    assert unfavourable.records[0].status == "changed"
+    assert "not the direction" in unfavourable.records[0].reason
+
+
+def test_missing_unit_is_not_comparable() -> None:
+    earlier = _finding(value="100", unit="", quote="We planted 100 saplings.")
+    later = _finding(value="80", unit="", quote="We planted 80 saplings.")
+
     report = build_tracking([earlier], [later], CONFIG)
 
-    record = report.records[0]
-    assert record.status == "changed"
-    assert record.direction == "unknown"
-    assert "could not be inferred" in record.reason
+    assert report.records[0].status == "not_comparable"
+    assert "missing recognized unit" in report.records[0].reason
 
 
-def test_unit_change_is_not_comparable() -> None:
-    earlier = _finding(value="100", unit="tCO2e")
-    later = _finding(value="80", unit="MWh")
+def test_missing_value_is_not_comparable() -> None:
+    earlier = _finding(value="", unit="", quote="We will reduce waste.")
+    later = _finding(value="", unit="", quote="We will reduce waste further.")
+
     report = build_tracking([earlier], [later], CONFIG)
+
+    assert report.records[0].status == "not_comparable"
+    assert "missing numeric value" in report.records[0].reason
+
+
+def test_changed_unit_is_not_comparable() -> None:
+    report = build_tracking(
+        [_finding(value="100", unit="tCO2e")],
+        [_finding(value="80", unit="MWh")],
+        CONFIG,
+    )
 
     record = report.records[0]
     assert record.status == "not_comparable"
-    assert record.change is None
     assert "unit changed" in record.reason
 
 
@@ -194,6 +243,8 @@ def test_multiplier_and_kilotonne_units_are_not_collapsed() -> None:
         value="900000", unit="t", quote="Emissions were 900,000 tonnes."
     )
     multiplier_report = build_tracking([million_tonnes], [plain_tonnes], CONFIG)
+    assert multiplier_report.records[0].earlier is not None
+    assert multiplier_report.records[0].earlier.unit == "million t"
     assert multiplier_report.records[0].status == "not_comparable"
 
     kilotonnes = _finding(value="1", unit="ktCO2e")
@@ -214,6 +265,16 @@ def test_year_tokens_are_not_used_as_values() -> None:
     assert report.records[0].earlier is not None
     assert report.records[0].earlier.value is None
 
+    extracted_year = _finding(
+        value="FY2023",
+        unit="",
+        quote="In FY2023 we reduced waste at our sites.",
+        target_text="Reduce waste.",
+    )
+    report = build_tracking([extracted_year], [], CONFIG)
+    assert report.records[0].earlier is not None
+    assert report.records[0].earlier.value is None
+
     with_number = _finding(
         value="",
         unit="",
@@ -227,101 +288,203 @@ def test_year_tokens_are_not_used_as_values() -> None:
     assert report.records[0].status == "progressing"
 
 
-def test_unit_change_can_be_ignored_by_config() -> None:
-    config = {"tracking": {"min_level": 3, "require_same_unit": False}}
-    earlier = _finding(value="100", unit="tCO2e")
-    later = _finding(value="80", unit="MWh")
-    report = build_tracking([earlier], [later], config)
+def test_number_is_bound_to_the_recognised_unit() -> None:
+    earlier = _finding(
+        value="",
+        unit="",
+        quote="We planted 1 million trees and emitted 50 tCO2e.",
+    )
+    later = _finding(value="40", unit="tCO2e")
 
+    report = build_tracking([earlier], [later], CONFIG)
+
+    assert report.records[0].earlier is not None
+    assert report.records[0].earlier.value == 50.0
     assert report.records[0].status == "progressing"
 
 
-def test_missing_unit_is_not_comparable() -> None:
-    earlier = _finding(
-        value="100",
-        unit="",
-        quote="Example quantified disclosure text without a unit.",
-    )
-    later = _finding(value="80", unit="tCO2e")
-    report = build_tracking([earlier], [later], CONFIG)
-
-    record = report.records[0]
-    assert record.status == "not_comparable"
-    assert "unit was not extracted" in record.reason
-
-
 def test_baseline_change_is_not_comparable() -> None:
-    earlier = _finding(value="100", unit="tCO2e", baseline="FY2020")
-    later = _finding(value="80", unit="tCO2e", baseline="FY2021")
-    report = build_tracking([earlier], [later], CONFIG)
+    report = build_tracking(
+        [_finding(value="100", baseline="2020")],
+        [_finding(value="80", baseline="2021")],
+        CONFIG,
+    )
 
     record = report.records[0]
     assert record.status == "not_comparable"
     assert "baseline changed" in record.reason
 
 
-def test_missing_numeric_value_is_not_comparable() -> None:
-    earlier = _finding(value="", unit="", quote="No numeric value disclosed here.")
-    later = _finding(value="80", unit="tCO2e")
-    report = build_tracking([earlier], [later], CONFIG)
+def test_matching_baseline_is_comparable() -> None:
+    report = build_tracking(
+        [_finding(value="100", baseline="FY2020")],
+        [_finding(value="80", baseline="fy2020")],
+        CONFIG,
+    )
 
-    record = report.records[0]
-    assert record.status == "not_comparable"
-    assert "numeric value was not extracted" in record.reason
+    assert report.records[0].status == "progressing"
 
 
-def test_missing_later_target_is_never_called_discontinued() -> None:
-    earlier = _finding(value="100", unit="tCO2e")
-    report = build_tracking([earlier], [], CONFIG)
+def test_unit_check_can_be_disabled_by_config() -> None:
+    config = {"tracking": {"min_level": 3, "require_same_unit": False}}
+    report = build_tracking(
+        [_finding(value="100", unit="tCO2e")],
+        [_finding(value="80", unit="MWh")],
+        config,
+    )
+
+    assert report.records[0].status == "progressing"
+
+
+# ---------------------------------------------------------------------------
+# Target presence and representative selection
+# ---------------------------------------------------------------------------
+
+
+def test_target_missing_later_is_not_found_not_discontinued() -> None:
+    report = build_tracking([_finding(value="100")], [], CONFIG)
 
     record = report.records[0]
     assert record.status == "not_found_in_later_report"
-    assert record.status_text == "not found in later report (needs review)"
-    assert "not evidence that the target was discontinued" in record.reason
+    assert "needs review" in record.status_text
+    assert "discontinued" not in " ".join(report.notes).lower().replace(
+        "never discontinued", ""
+    )
+    assert "never discontinued" in " ".join(report.notes).lower()
 
 
-def test_new_later_target_is_reported_separately() -> None:
-    later = _finding(value="100", unit="tCO2e")
-    report = build_tracking([], [later], CONFIG)
+def test_new_target_in_later_report() -> None:
+    report = build_tracking([], [_finding(value="100")], CONFIG)
 
     record = report.records[0]
     assert record.status == "new_in_later_report"
     assert record.earlier is None
+    assert record.later is not None
 
 
-def test_only_scored_findings_at_or_above_min_level_are_compared() -> None:
-    low_level = _finding(value="100", unit="tCO2e", level=2)
-    unverified = _finding(value="100", unit="tCO2e", quote_verified=False)
-    blocked = _finding(
-        value="100", unit="tCO2e", semantic_support="uncertain"
-    )
-    report = build_tracking([low_level, unverified, blocked], [], CONFIG)
+def test_unscored_and_below_level_findings_are_ignored() -> None:
+    unverified = _finding(value="100", quote_verified=False)
+    low_level = _finding(value="90", level=2, page=11)
+    report = build_tracking([unverified], [low_level], CONFIG)
 
     assert report.records == []
 
 
+def test_flagged_findings_are_ignored() -> None:
+    flagged = _finding(value="100", review_reason="needs human review")
+    report = build_tracking([flagged], [_finding(value="80")], CONFIG)
+
+    assert [record.status for record in report.records] == [
+        "new_in_later_report"
+    ]
+
+
+def test_semantically_unsupported_findings_are_ignored() -> None:
+    unsupported = _finding(value="100", semantic_support="not_supported")
+    report = build_tracking([unsupported], [_finding(value="80")], CONFIG)
+
+    assert report.records[0].status == "new_in_later_report"
+
+
+def test_highest_level_representative_is_chosen_deterministically() -> None:
+    earlier = [
+        _finding(value="100", level=3, page=10),
+        _finding(value="90", level=4, page=11),
+    ]
+    report = build_tracking(earlier, [_finding(value="80")], CONFIG)
+
+    record = report.records[0]
+    assert record.earlier is not None
+    assert record.earlier.level == 4
+    assert record.earlier.value == 90.0
+
+
+def test_highest_confidence_breaks_a_level_tie() -> None:
+    earlier = [
+        _finding(value="100", level=3, page=10, confidence=0.5),
+        _finding(value="90", level=3, page=11, confidence=0.95),
+    ]
+    report = build_tracking(earlier, [_finding(value="80")], CONFIG)
+
+    assert report.records[0].earlier is not None
+    assert report.records[0].earlier.value == 90.0
+
+
+def test_records_are_sorted_by_goal_and_target() -> None:
+    earlier = [
+        _finding(target_id="13.2", goal=13),
+        _finding(target_id="6.4", goal=6),
+        _finding(target_id="13.1", goal=13),
+    ]
+    report = build_tracking(earlier, [], CONFIG)
+
+    assert [record.target_id for record in report.records] == [
+        "6.4",
+        "13.1",
+        "13.2",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Configuration and rendering
+# ---------------------------------------------------------------------------
+
+
 def test_min_level_override_allows_lower_levels() -> None:
-    earlier = _finding(value="100", unit="tCO2e", level=2)
+    earlier = _finding(value="100", level=3)
     later = _finding(value="90", unit="tCO2e", level=2)
     report = build_tracking([earlier], [later], CONFIG, min_level=2)
 
     assert report.records[0].status == "progressing"
     assert report.min_level == 2
     assert report.to_dict()["min_level"] == 2
-    assert "Only Level 2 and above" in report.notes[0]
+    assert "Only Level 2 and above scored findings" in report.notes[0]
     assert "Only Level 2 and above scored findings" in render_markdown(report)
 
 
+def test_default_min_level_is_level_three() -> None:
+    report = build_tracking([], [], {})
+    assert report.min_level == 3
+
+
 def test_invalid_min_level_is_rejected() -> None:
-    with pytest.raises(ValueError):
-        build_tracking([], [], CONFIG, min_level=5)
-    with pytest.raises(ValueError):
-        build_tracking([], [], CONFIG, min_level=0)
+    for invalid in (0, 5, 2.5, True, "three"):
+        with pytest.raises(ValueError):
+            build_tracking([], [], CONFIG, min_level=invalid)
 
 
 def test_empty_report_message_uses_configured_min_level() -> None:
     markdown = render_markdown(build_tracking([], [], CONFIG, min_level=2))
     assert "No quantified findings at Level 2 or above" in markdown
+
+
+def test_markdown_and_json_include_statuses_and_counts() -> None:
+    report = build_tracking(
+        [_finding(value="100")],
+        [_finding(value="80")],
+        CONFIG,
+        earlier_label="Alpha 2022",
+        later_label="Alpha 2023",
+    )
+    markdown = render_markdown(report)
+    data = report.to_dict()
+
+    assert "Alpha 2022" in markdown
+    assert "Alpha 2023" in markdown
+    assert "| 13.2 | progressing |" in markdown
+    assert data["counts"]["progressing"] == 1
+    assert data["records"][0]["status_text"] == "progressing"
+    assert set(data["counts"]) == set(TRACKING_STATUS_TEXT)
+
+
+def test_markdown_uses_ascii_placeholders() -> None:
+    markdown = render_markdown(build_tracking([], [], CONFIG))
+    assert markdown.isascii()
+
+
+# ---------------------------------------------------------------------------
+# Payload loading and CLI
+# ---------------------------------------------------------------------------
 
 
 def test_missing_findings_list_is_an_error() -> None:
@@ -333,140 +496,65 @@ def test_missing_findings_list_is_an_error() -> None:
         )
 
 
-def test_highest_level_representative_is_chosen_deterministically() -> None:
-    earlier = [
-        _finding(value="100", unit="tCO2e", level=3, page=10),
-        _finding(value="90", unit="tCO2e", level=4, page=11),
-    ]
-    later = _finding(value="90", unit="tCO2e", level=4, page=12)
-    report = build_tracking(earlier, [later], CONFIG)
+def test_track_payloads_round_trips_serialized_findings() -> None:
+    report = track_payloads(
+        _payload("Earlier", [_finding(value="100")]),
+        _payload("Later", [_finding(value="80")]),
+        CONFIG,
+    )
 
-    record = report.records[0]
-    assert record.earlier is not None
-    assert record.earlier.value == 90.0
-    assert record.earlier.level == 4
-    assert record.status == "unchanged"
+    assert report.records[0].status == "progressing"
 
 
-# ---------------------------------------------------------------------------
-# Direction and year inference
-# ---------------------------------------------------------------------------
-
-
-def test_direction_inference_uses_target_wording() -> None:
-    decrease = _finding(value="1", target_text="Reduce emissions.")
-    increase = _finding(value="1", target_text="Increase renewable capacity.")
-    unknown = _finding(value="1", target_text="Our approach to water.")
-
-    assert infer_direction(
-        next(iter(build_tracking([decrease], [], CONFIG).records)).earlier
-    ) == "decrease"
-    assert infer_direction(
-        next(iter(build_tracking([increase], [], CONFIG).records)).earlier
-    ) == "increase"
-    assert infer_direction(
-        next(iter(build_tracking([unknown], [], CONFIG).records)).earlier
-    ) == "unknown"
-
-
-def test_reporting_year_prefers_financial_year_end() -> None:
-    assert infer_reporting_year({"title": "Annual Report FY2023-24"}) == 2024
-    assert infer_reporting_year({"title": "brsr_fy2023_24"}) == 2024
-    assert infer_reporting_year({"title": "Sustainability Report 2022"}) == 2022
-    assert infer_reporting_year({"pdf_path": "reports/annual_2021.pdf"}) == 2021
-    assert infer_reporting_year({}) is None
-    assert infer_reporting_year(None) is None
-
-
-def test_track_payloads_uses_document_labels_and_years() -> None:
-    earlier = _finding(value="100", unit="tCO2e")
-    later = _finding(value="80", unit="tCO2e")
-    earlier_payload = {
-        "document": {"title": "Earlier Report FY2022-23"},
-        "findings": [earlier.to_dict()],
-    }
-    later_payload = {
-        "document": {"title": "Later Report FY2023-24"},
-        "findings": [later.to_dict()],
-    }
-
-    report = track_payloads(earlier_payload, later_payload, CONFIG)
-
-    assert report.earlier_label == "Earlier Report FY2022-23"
-    assert report.later_label == "Later Report FY2023-24"
-    assert report.records[0].earlier is not None
-    assert report.records[0].earlier.year == "2023"
-    assert report.records[0].later is not None
-    assert report.records[0].later.year == "2024"
-
-
-# ---------------------------------------------------------------------------
-# Rendering and CLI
-# ---------------------------------------------------------------------------
-
-
-def test_status_labels_are_neutral() -> None:
-    for label in TRACKING_STATUS_TEXT.values():
-        assert "discontinued" not in label.lower()
-
-
-def test_markdown_report_contains_neutral_caveat_and_records() -> None:
-    earlier = _finding(value="100", unit="tCO2e")
-    later = _finding(value="80", unit="tCO2e")
-    markdown = render_markdown(build_tracking([earlier], [later], CONFIG))
-
-    assert "does not verify real-world performance" in markdown
-    assert "| progressing |" in markdown
-    assert "not evidence that the target was discontinued" in markdown
-
-
-def test_cli_writes_json_and_markdown(tmp_path, capsys) -> None:
-    earlier = _finding(value="100", unit="tCO2e")
-    later = _finding(value="80", unit="tCO2e")
-    earlier_path = tmp_path / "earlier.json"
-    later_path = tmp_path / "later.json"
-    out_path = tmp_path / "tracking.json"
-    markdown_path = tmp_path / "tracking.md"
-    earlier_path.write_text(
-        json.dumps(
-            {
-                "document": {"title": "Earlier Report"},
-                "findings": [earlier.to_dict()],
-            }
-        ),
+def test_cli_writes_json_and_markdown(tmp_path) -> None:
+    earlier = tmp_path / "earlier.json"
+    later = tmp_path / "later.json"
+    earlier.write_text(
+        json.dumps(_payload("Earlier", [_finding(value="100")])),
         encoding="utf-8",
     )
-    later_path.write_text(
-        json.dumps(
-            {
-                "document": {"title": "Later Report"},
-                "findings": [later.to_dict()],
-            }
-        ),
+    later.write_text(
+        json.dumps(_payload("Later", [_finding(value="80")])),
         encoding="utf-8",
     )
+    out_json = tmp_path / "tracking.json"
+    out_md = tmp_path / "tracking.md"
 
     code = main(
         [
-            str(earlier_path),
-            str(later_path),
+            str(earlier),
+            str(later),
             "--out",
-            str(out_path),
+            str(out_json),
             "--markdown",
-            str(markdown_path),
+            str(out_md),
+            "--earlier-label",
+            "Alpha 2022",
+            "--later-label",
+            "Alpha 2023",
         ]
     )
 
     assert code == 0
-    payload = json.loads(out_path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "0.1"
-    assert payload["records"][0]["status"] == "progressing"
-    assert "progressing" in markdown_path.read_text(encoding="utf-8")
-    assert "Wrote tracking JSON" in capsys.readouterr().out
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    assert data["earlier_label"] == "Alpha 2022"
+    assert data["records"][0]["status"] == "progressing"
+    assert "progressing" in out_md.read_text(encoding="utf-8")
 
 
-def test_cli_returns_error_for_missing_input(tmp_path) -> None:
-    code = main(
-        [str(tmp_path / "missing-a.json"), str(tmp_path / "missing-b.json")]
-    )
-    assert code == 2
+def test_cli_returns_two_for_invalid_payload(tmp_path) -> None:
+    earlier = tmp_path / "earlier.json"
+    later = tmp_path / "later.json"
+    earlier.write_text(json.dumps({"document": {}}), encoding="utf-8")
+    later.write_text(json.dumps(_payload("Later", [])), encoding="utf-8")
+
+    assert main([str(earlier), str(later)]) == 2
+
+
+def test_cli_returns_two_for_invalid_min_level(tmp_path) -> None:
+    earlier = tmp_path / "earlier.json"
+    later = tmp_path / "later.json"
+    earlier.write_text(json.dumps(_payload("Earlier", [])), encoding="utf-8")
+    later.write_text(json.dumps(_payload("Later", [])), encoding="utf-8")
+
+    assert main([str(earlier), str(later), "--min-level", "5"]) == 2

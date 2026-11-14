@@ -1,9 +1,16 @@
-﻿.venv/
+.venv/
 __pycache__/
-.cache/
-outputs/
-data/osdg/
-data/reports/
-*.pdf
+*.py[cod]
 .pytest_cache/
 .ruff_cache/
+.cache/
+outputs/*
+!outputs/.gitkeep
+eval/results.csv
+eval/*.md
+
+# Large local datasets are not committed; download them separately.
+data/dataset_prism17/
+data/osdg/
+
+.DS_Store

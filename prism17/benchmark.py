@@ -1,11 +1,4 @@
-"""Build and score a human-annotation benchmark for Prism17 findings.
-
-This module does two things:
-
-* :func:`build_annotation_rows` turns an audit JSON into a CSV template with
-  blank reviewer columns. It does not invent labels.
-* :func:`score_annotations` scores a filled template against the model output
-  using the deterministic metrics in :mod:`prism17.evaluation`.
+"""Human-annotation benchmark tooling.
 
 The benchmark measures disclosure-level agreement: relevance, rubric level,
 quote verification, and semantic support. It does not measure real-world
@@ -19,28 +12,37 @@ both also leave the metrics null.
 from __future__ import annotations
 
 import csv
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
-from .evaluation import binary_metrics, categorical_agreement, rubric_agreement
-from .models import VerifiedFinding, is_not_relevant
-from .tracking import infer_reporting_year
+from .audit_io import findings_from_payload, infer_reporting_year
+from .evaluation import (
+    binary_metrics,
+    categorical_agreement,
+    confusion_matrix,
+    rubric_agreement,
+)
+from .models import VerifiedFinding
 
-ANNOTATION_FIELDS = [
+LEVELS = (1, 2, 3, 4)
+SEMANTIC_LABELS = ("supported", "uncertain", "not_supported")
+
+BENCHMARK_FIELDS = [
     "annotation_id",
-    "audit_path",
     "company",
-    "reporting_year",
-    "pdf_path",
+    "year",
+    "source_path",
+    "title",
+    "target_id",
     "page",
     "passage_id",
-    "target_id",
     "claim",
     "quote",
     "model_relevant",
     "model_level",
-    "model_quote_verified",
+    "model_quote_ok",
     "model_semantic_support",
     "model_review_reason",
     "reviewer_relevant",
@@ -54,187 +56,35 @@ ANNOTATION_FIELDS = [
 
 REQUIRED_COLUMNS = {
     "annotation_id",
-    "page",
-    "target_id",
     "claim",
+    "page",
     "quote",
     "model_relevant",
     "model_level",
+    "model_quote_ok",
+    "model_semantic_support",
     "reviewer_relevant",
     "reviewer_level",
+    "reviewer_quote_ok",
+    "reviewer_semantic_support",
 }
 
-LEVELS = (1, 2, 3, 4)
-SEMANTIC_LABELS = ("supported", "uncertain", "not_supported")
-
-
-def _label(document: dict[str, Any], fallback: str = "") -> str:
-    title = str(document.get("title") or "").strip()
-    if title:
-        return title
-    pdf_path = str(document.get("pdf_path") or "").strip()
-    if pdf_path:
-        return Path(pdf_path).stem
-    return fallback
-
-
-def _findings_from_payload(payload: dict[str, Any]) -> list[VerifiedFinding]:
-    if "findings" not in payload:
-        raise ValueError("audit JSON has no 'findings' list")
-    return [
-        VerifiedFinding.from_dict(item)
-        for item in (payload.get("findings") or [])
-    ]
-
-
-def build_annotation_rows(
-    payload: dict[str, Any],
-    *,
-    audit_path: str = "",
-    prefix: str = "ann",
-    include_unscored: bool = True,
-    include_not_relevant: bool = False,
-) -> list[dict[str, str]]:
-    """Build blank-reviewer annotation rows from one audit payload.
-
-    Scored findings and findings that need human review are included by
-    default. Clean "judged not relevant" candidates are excluded unless
-    ``include_not_relevant`` is set, because they are not claims about a target.
-    """
-    document = payload.get("document") or {}
-    company = _label(document)
-    year = ""
-    inferred_year = infer_reporting_year(document)
-    if inferred_year is not None:
-        year = str(inferred_year)
-
-    rows: list[dict[str, str]] = []
-    for finding in _findings_from_payload(payload):
-        if not include_unscored and not finding.is_scored:
-            continue
-        if is_not_relevant(finding) and not include_not_relevant:
-            continue
-
-        rows.append(
-            {
-                "annotation_id": f"{prefix}-{len(rows) + 1:04d}",
-                "audit_path": str(audit_path),
-                "company": company,
-                "reporting_year": year,
-                "pdf_path": str(document.get("pdf_path") or ""),
-                "page": str(finding.source_page),
-                "passage_id": finding.judged.candidate.passage_id,
-                "target_id": finding.judged.sdg_target,
-                "claim": finding.judged.claim,
-                "quote": finding.judged.supporting_quote,
-                "model_relevant": "1" if finding.judged.relevant else "0",
-                "model_level": (
-                    str(finding.level) if finding.level is not None else ""
-                ),
-                "model_quote_verified": "1" if finding.quote_verified else "0",
-                "model_semantic_support": finding.semantic_support,
-                "model_review_reason": finding.review_reason or "",
-                "reviewer_relevant": "",
-                "reviewer_level": "",
-                "reviewer_quote_ok": "",
-                "reviewer_semantic_support": "",
-                "reviewer_notes": "",
-                "annotator": "",
-                "annotated_at_utc": "",
-            }
-        )
-    return rows
-
-
-def write_annotation_csv(
-    rows: Iterable[dict[str, Any]],
-    path: str | Path,
-) -> Path:
-    """Write annotation rows with a stable column order."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=ANNOTATION_FIELDS)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(
-                {field: row.get(field, "") for field in ANNOTATION_FIELDS}
-            )
-    return target
-
-
-def read_annotation_csv(path: str | Path) -> list[dict[str, str]]:
-    """Read a gold CSV, validating the required columns."""
-    target = Path(path)
-    with target.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        columns = set(reader.fieldnames or [])
-        missing = REQUIRED_COLUMNS - columns
-        if missing:
-            raise ValueError(
-                "gold CSV is missing required columns: "
-                + ", ".join(sorted(missing))
-            )
-        return [
-            {key: (value or "") for key, value in row.items()}
-            for row in reader
-        ]
-
-
-def _parse_level(value: str) -> tuple[int | None, bool]:
-    text = str(value or "").strip()
-    if not text:
-        return None, True
-    try:
-        numeric = float(text)
-    except ValueError:
-        return None, False
-    if not numeric.is_integer():
-        return None, False
-    parsed = int(numeric)
-    if parsed not in LEVELS:
-        return None, False
-    return parsed, True
-
-
-def _parse_binary(value: str) -> tuple[int | None, bool]:
-    text = str(value or "").strip().lower()
-    if not text:
-        return None, True
-    if text in {"1", "true", "yes", "y"}:
-        return 1, True
-    if text in {"0", "false", "no", "n"}:
-        return 0, True
-    return None, False
-
-
-def _parse_semantic(value: str) -> tuple[str | None, bool]:
-    text = str(value or "").strip().lower()
-    if not text or text in {"not_checked", "not checked"}:
-        return None, True
-    if text in SEMANTIC_LABELS:
-        return text, True
-    return None, False
-
-
-def _level_counts(values: Sequence[int]) -> dict[str, int]:
-    return {
-        str(level): sum(1 for value in values if value == level)
-        for level in LEVELS
-    }
+_TRUE_VALUES = {"1", "true", "yes", "y", "t"}
+_FALSE_VALUES = {"0", "false", "no", "n", "f"}
 
 
 @dataclass
-class _Pairs:
-    reviewer_relevance: list[int]
-    model_relevance: list[int]
-    reviewer_levels: list[int]
-    model_levels: list[int]
-    reviewer_quote: list[int]
-    model_quote: list[int]
+class PairCollector:
+    reviewer_relevance: list[int] = field(default_factory=list)
+    model_relevance: list[int] = field(default_factory=list)
+    reviewer_levels: list[int] = field(default_factory=list)
+    model_levels: list[int] = field(default_factory=list)
+    reviewer_quote: list[int] = field(default_factory=list)
+    model_quote: list[int] = field(default_factory=list)
     reviewer_semantic: list[str] = field(default_factory=list)
     model_semantic: list[str] = field(default_factory=list)
     invalid_values: int = 0
+    invalid_model_values: int = 0
     valid_reviewer_values: int = 0
     missing_relevance: int = 0
     missing_levels: int = 0
@@ -242,41 +92,188 @@ class _Pairs:
     missing_semantic: int = 0
 
 
-def _collect_pairs(rows: Sequence[dict[str, str]]) -> _Pairs:
-    pairs = _Pairs([], [], [], [], [], [])
+def parse_bool(value: Any) -> bool | None:
+    """Parse a boolean annotation value; blank returns ``None``."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text in _TRUE_VALUES:
+        return True
+    if text in _FALSE_VALUES:
+        return False
+    raise ValueError(f"invalid boolean value: {value!r}")
+
+
+def parse_level(value: Any) -> int | None:
+    """Parse a strict integer rubric level; fractional values are invalid."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        numeric = float(text)
+    except ValueError as exc:
+        raise ValueError(f"invalid rubric level: {value!r}") from exc
+    if not numeric.is_integer():
+        raise ValueError(f"invalid rubric level: {value!r}")
+    level = int(numeric)
+    if level not in LEVELS:
+        raise ValueError(f"invalid rubric level: {value!r}")
+    return level
+
+
+def parse_semantic(value: Any) -> str | None:
+    """Parse a semantic-support label; blank and ``not_checked`` return None."""
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not text or text == "not_checked":
+        return None
+    if text not in SEMANTIC_LABELS:
+        raise ValueError(f"invalid semantic-support value: {value!r}")
+    return text
+
+
+def template_rows(
+    payloads: Sequence[dict[str, Any]],
+    *,
+    labels: Sequence[str] | None = None,
+    paths: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build annotation-template rows from one or more audit payloads."""
+    if labels and len(labels) != len(payloads):
+        raise ValueError("labels must match the number of audit files")
+    if paths and len(paths) != len(payloads):
+        raise ValueError("paths must match the number of audit files")
+
+    rows: list[dict[str, Any]] = []
+    for payload_index, payload in enumerate(payloads):
+        path = paths[payload_index] if paths else ""
+        fallback = Path(path).stem if path else f"audit-{payload_index + 1}"
+        label = labels[payload_index] if labels else fallback
+        document = payload.get("document")
+        title = (
+            str(document.get("title") or "")
+            if isinstance(document, dict)
+            else ""
+        ) or label
+        year = infer_reporting_year(payload)
+        findings: list[VerifiedFinding] = findings_from_payload(payload)
+        for finding_index, finding in enumerate(findings, start=1):
+            rows.append(
+                {
+                    "annotation_id": (
+                        f"ann-{Path(path).stem if path else fallback}-"
+                        f"{finding_index:04d}"
+                    ),
+                    "company": label,
+                    "year": year or "",
+                    "source_path": path,
+                    "title": title,
+                    "target_id": finding.judged.sdg_target,
+                    "page": finding.source_page,
+                    "passage_id": finding.judged.candidate.passage_id,
+                    "claim": finding.judged.claim,
+                    "quote": finding.judged.supporting_quote,
+                    "model_relevant": int(bool(finding.judged.relevant)),
+                    "model_level": (
+                        "" if finding.level is None else int(finding.level)
+                    ),
+                    "model_quote_ok": int(bool(finding.quote_verified)),
+                    "model_semantic_support": finding.semantic_support,
+                    "model_review_reason": finding.review_reason or "",
+                    "reviewer_relevant": "",
+                    "reviewer_level": "",
+                    "reviewer_quote_ok": "",
+                    "reviewer_semantic_support": "",
+                    "reviewer_notes": "",
+                    "annotator": "",
+                    "annotated_at_utc": "",
+                }
+            )
+    return rows
+
+
+def write_template(
+    path: str | Path,
+    rows: Sequence[dict[str, Any]],
+    *,
+    force: bool = False,
+) -> Path:
+    """Write a CSV annotation template, refusing to overwrite by default."""
+    target = Path(path)
+    if target.exists() and not force:
+        raise FileExistsError(
+            f"Gold file already exists: {target}. Use --force to overwrite."
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=BENCHMARK_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return target
+
+
+def read_rows(path: str | Path) -> list[dict[str, str]]:
+    """Read a gold CSV and validate that required columns are present."""
+    with Path(path).open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = set(reader.fieldnames or [])
+        missing = sorted(REQUIRED_COLUMNS.difference(fieldnames))
+        if missing:
+            raise ValueError(
+                "gold CSV is missing required columns: " + ", ".join(missing)
+            )
+        return [dict(row) for row in reader]
+
+
+def _try_parse(parser: Any, value: Any) -> tuple[Any, bool]:
+    try:
+        return parser(value), True
+    except ValueError:
+        return None, False
+
+
+def _collect_pairs(rows: Sequence[dict[str, Any]]) -> PairCollector:
+    pairs = PairCollector()
     for row in rows:
-        model_relevant, model_ok = _parse_binary(row.get("model_relevant", ""))
-        reviewer_relevant, reviewer_ok = _parse_binary(
-            row.get("reviewer_relevant", "")
+        model_relevant, model_relevant_ok = _try_parse(
+            parse_bool, row.get("model_relevant")
         )
-        model_level, model_level_ok = _parse_level(
-            row.get("model_level", "")
+        model_level, model_level_ok = _try_parse(
+            parse_level, row.get("model_level")
         )
-        reviewer_level, reviewer_level_ok = _parse_level(
-            row.get("reviewer_level", "")
+        model_quote, model_quote_ok = _try_parse(
+            parse_bool, row.get("model_quote_ok")
         )
-        model_quote, model_quote_ok = _parse_binary(
-            row.get("model_quote_verified", "")
+        model_semantic, model_semantic_ok = _try_parse(
+            parse_semantic, row.get("model_semantic_support")
         )
-        reviewer_quote, reviewer_quote_ok = _parse_binary(
-            row.get("reviewer_quote_ok", "")
+
+        reviewer_relevant, reviewer_relevant_ok = _try_parse(
+            parse_bool, row.get("reviewer_relevant")
         )
-        model_semantic, model_semantic_ok = _parse_semantic(
-            row.get("model_semantic_support", "")
+        reviewer_level, reviewer_level_ok = _try_parse(
+            parse_level, row.get("reviewer_level")
         )
-        reviewer_semantic, reviewer_semantic_ok = _parse_semantic(
-            row.get("reviewer_semantic_support", "")
+        reviewer_quote, reviewer_quote_ok = _try_parse(
+            parse_bool, row.get("reviewer_quote_ok")
+        )
+        reviewer_semantic, reviewer_semantic_ok = _try_parse(
+            parse_semantic, row.get("reviewer_semantic_support")
         )
 
         if not all(
             (
-                model_ok,
-                reviewer_ok,
+                model_relevant_ok,
                 model_level_ok,
-                reviewer_level_ok,
                 model_quote_ok,
-                reviewer_quote_ok,
                 model_semantic_ok,
+            )
+        ):
+            pairs.invalid_model_values += 1
+        if not all(
+            (
+                reviewer_relevant_ok,
+                reviewer_level_ok,
+                reviewer_quote_ok,
                 reviewer_semantic_ok,
             )
         ):
@@ -292,41 +289,50 @@ def _collect_pairs(rows: Sequence[dict[str, str]]) -> _Pairs:
             )
         )
 
-        if model_relevant is not None and reviewer_relevant is not None:
-            pairs.reviewer_relevance.append(reviewer_relevant)
-            pairs.model_relevance.append(model_relevant)
-        elif model_ok and reviewer_ok:
+        if reviewer_relevant is not None and model_relevant is not None:
+            pairs.reviewer_relevance.append(int(bool(reviewer_relevant)))
+            pairs.model_relevance.append(int(bool(model_relevant)))
+        elif reviewer_relevant is not None:
             pairs.missing_relevance += 1
 
-        if model_level is not None and reviewer_level is not None:
-            pairs.reviewer_levels.append(reviewer_level)
-            pairs.model_levels.append(model_level)
-        elif model_level_ok and reviewer_level_ok:
+        if reviewer_level is not None and model_level is not None:
+            pairs.reviewer_levels.append(int(reviewer_level))
+            pairs.model_levels.append(int(model_level))
+        elif reviewer_level is not None:
             pairs.missing_levels += 1
 
-        if model_quote is not None and reviewer_quote is not None:
-            pairs.reviewer_quote.append(reviewer_quote)
-            pairs.model_quote.append(model_quote)
-        elif model_quote_ok and reviewer_quote_ok:
+        if reviewer_quote is not None and model_quote is not None:
+            pairs.reviewer_quote.append(int(bool(reviewer_quote)))
+            pairs.model_quote.append(int(bool(model_quote)))
+        elif reviewer_quote is not None:
             pairs.missing_quote += 1
 
-        if model_semantic is not None and reviewer_semantic is not None:
-            pairs.reviewer_semantic.append(reviewer_semantic)
-            pairs.model_semantic.append(model_semantic)
-        elif model_semantic_ok and reviewer_semantic_ok:
+        if (
+            reviewer_semantic is not None
+            and model_semantic is not None
+            and model_semantic != "not_checked"
+        ):
+            pairs.reviewer_semantic.append(str(reviewer_semantic))
+            pairs.model_semantic.append(str(model_semantic))
+        elif reviewer_semantic is not None:
             pairs.missing_semantic += 1
+
     return pairs
 
 
-def score_annotations(rows: Sequence[dict[str, str]]) -> dict[str, Any]:
-    """Score a filled gold CSV.
+def _binary_block(
+    reviewer: Sequence[int],
+    model: Sequence[int],
+) -> dict[str, Any] | None:
+    if not reviewer:
+        return None
+    metrics = binary_metrics(reviewer, model)
+    metrics["confusion"] = confusion_matrix(reviewer, model, [0, 1])
+    return metrics
 
-    Each metric is computed only from rows where both the model value and the
-    reviewer value are present and valid. When no reviewer labels are present,
-    the matching metric is ``None`` and the overall status is
-    ``no_annotations``. Invalid labels yield ``invalid_annotations``, and
-    labels with no model counterpart yield ``no_pairs``.
-    """
+
+def score_annotations(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Score reviewer labels against model labels without fabricating values."""
     pairs = _collect_pairs(rows)
     relevance_available = bool(pairs.reviewer_relevance)
     rubric_available = bool(pairs.reviewer_levels)
@@ -338,6 +344,7 @@ def score_annotations(rows: Sequence[dict[str, str]]) -> dict[str, Any]:
         or quote_available
         or semantic_available
     )
+
     if metrics_available:
         status = "ok"
     elif pairs.invalid_values:
@@ -360,39 +367,46 @@ def score_annotations(rows: Sequence[dict[str, str]]) -> dict[str, Any]:
         },
         "skipped": {
             "invalid_values": pairs.invalid_values,
+            "invalid_model_values": pairs.invalid_model_values,
             "missing_relevance": pairs.missing_relevance,
             "missing_levels": pairs.missing_levels,
             "missing_quote": pairs.missing_quote,
             "missing_semantic": pairs.missing_semantic,
         },
-        "relevance": (
-            binary_metrics(
-                pairs.reviewer_relevance, pairs.model_relevance
-            )
-            if relevance_available
-            else None
+        "relevance": _binary_block(
+            pairs.reviewer_relevance, pairs.model_relevance
         ),
         "rubric": (
             rubric_agreement(pairs.reviewer_levels, pairs.model_levels)
             if rubric_available
             else None
         ),
-        "quote_verification": (
-            binary_metrics(pairs.reviewer_quote, pairs.model_quote)
-            if quote_available
-            else None
+        "quote_verification": _binary_block(
+            pairs.reviewer_quote, pairs.model_quote
         ),
         "semantic_support": (
             categorical_agreement(
                 pairs.reviewer_semantic,
                 pairs.model_semantic,
-                labels=SEMANTIC_LABELS,
+                SEMANTIC_LABELS,
             )
             if semantic_available
             else None
         ),
-        "level_counts": {
-            "reviewer": _level_counts(pairs.reviewer_levels),
-            "model": _level_counts(pairs.model_levels),
-        },
     }
+
+
+def score_csv(path: str | Path) -> dict[str, Any]:
+    """Read a gold CSV and return benchmark metrics."""
+    return score_annotations(read_rows(path))
+
+
+def write_report(path: str | Path, document: dict[str, Any]) -> Path:
+    """Write a benchmark JSON report."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(document, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return target

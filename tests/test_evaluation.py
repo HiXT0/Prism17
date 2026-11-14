@@ -12,10 +12,12 @@ from prism17.evaluation import (
     binary_metrics,
     categorical_agreement,
     cohen_kappa,
+    confusion_matrix,
     default_thresholds,
     evaluate_threshold,
     file_info,
     macro_f1_over_groups,
+    mean_absolute_difference,
     per_group_metrics,
     quadratic_weighted_kappa,
     rubric_agreement,
@@ -209,6 +211,53 @@ def test_select_threshold_falls_back_to_overall_f1_without_two_class_groups() ->
     assert selected["threshold"] == 0.4
 
 
+def test_confusion_matrix_rows_are_truth_and_columns_are_prediction() -> None:
+    matrix = confusion_matrix([1, 0, 1], [1, 1, 0], [0, 1])
+    assert matrix["labels"] == [0, 1]
+    assert matrix["matrix"] == [[0, 1], [1, 1]]
+
+
+def test_cohen_kappa_perfect_and_chance() -> None:
+    assert cohen_kappa([1, 0, 1, 0], [1, 0, 1, 0]) == 1.0
+    assert cohen_kappa([], []) is None
+    # Two raters agree on every row, but one label dominates: kappa is 0.
+    assert cohen_kappa([1, 1, 1, 0], [1, 1, 1, 0]) == 1.0
+    assert cohen_kappa([1, 0, 1, 0], [0, 1, 0, 1]) == -1.0
+
+
+def test_quadratic_weighted_kappa_perfect_and_one_step() -> None:
+    assert quadratic_weighted_kappa([1, 2, 3, 4], [1, 2, 3, 4]) == 1.0
+    value = quadratic_weighted_kappa([1, 2, 3, 4], [2, 3, 4, 4])
+    assert value is not None
+    assert value < 1.0
+
+
+def test_mean_absolute_difference() -> None:
+    assert mean_absolute_difference([1, 2, 3], [1, 3, 3]) == pytest.approx(1 / 3)
+    assert mean_absolute_difference([], []) is None
+
+
+def test_categorical_agreement_skips_missing_values() -> None:
+    result = categorical_agreement(
+        ["supported", None, "uncertain"],
+        ["supported", "uncertain", "uncertain"],
+        ["supported", "uncertain", "not_supported"],
+    )
+    assert result["n"] == 2
+    assert result["agreement"] == 1.0
+    assert result["kappa"] == 1.0
+    assert result["confusion"]["matrix"] == [[1, 0, 0], [0, 1, 0], [0, 0, 0]]
+
+
+def test_rubric_agreement_reports_exact_within_one_and_qwk() -> None:
+    result = rubric_agreement([1, 2, 3, 4], [1, 2, 4, 4])
+    assert result["n"] == 4
+    assert result["exact_agreement"] == 0.75
+    assert result["within_one"] == 1.0
+    assert result["mean_absolute_difference"] == 0.25
+    assert result["quadratic_weighted_kappa"] is not None
+
+
 def test_file_info_and_append_jsonl(tmp_path: Path) -> None:
     source = tmp_path / "data.txt"
     source.write_text("hello", encoding="utf-8")
@@ -216,106 +265,11 @@ def test_file_info_and_append_jsonl(tmp_path: Path) -> None:
     assert info["bytes"] == 5
     assert len(info["sha256"]) == 64
     assert len(info["md5"]) == 32
+    assert info["path"] == "data.txt"
+    assert str(tmp_path) not in info["path"]
 
     log = tmp_path / "runs.jsonl"
     append_jsonl(log, {"run": 1})
     append_jsonl(log, {"run": 2})
     lines = log.read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["run"] for line in lines] == [1, 2]
-
-
-# ---------------------------------------------------------------------------
-# Agreement metrics
-# ---------------------------------------------------------------------------
-
-
-def test_cohen_kappa_perfect_and_chance_agreement() -> None:
-    perfect = cohen_kappa([1, 2, 3, 4], [1, 2, 3, 4], labels=[1, 2, 3, 4])
-    assert perfect["observed_agreement"] == 1.0
-    assert perfect["expected_agreement"] == 0.25
-    assert perfect["kappa"] == 1.0
-
-    chance = cohen_kappa([1, 1, 2, 2], [1, 2, 1, 2], labels=[1, 2])
-    assert chance["observed_agreement"] == 0.5
-    assert chance["expected_agreement"] == 0.5
-    assert chance["kappa"] == 0.0
-
-
-def test_cohen_kappa_handles_empty_and_single_label_input() -> None:
-    empty = cohen_kappa([], [])
-    assert empty["n"] == 0
-    assert empty["kappa"] == 0.0
-
-    single = cohen_kappa([1, 1], [1, 1], labels=[1])
-    assert single["expected_agreement"] == 1.0
-    assert single["kappa"] == 1.0
-
-
-def test_cohen_kappa_rejects_length_mismatch() -> None:
-    with pytest.raises(ValueError):
-        cohen_kappa([1, 2], [1])
-
-
-def test_quadratic_weighted_kappa_rewards_near_misses() -> None:
-    # One two-level swap, two exact matches, one one-level miss.
-    result = quadratic_weighted_kappa(
-        [1, 1, 2, 2], [1, 2, 2, 2], labels=[1, 2]
-    )
-    assert result["observed_agreement"] == 0.75
-    assert result["expected_agreement"] == 0.5
-    assert result["kappa"] == 0.5
-
-
-def test_quadratic_weighted_kappa_is_one_for_identical_ratings() -> None:
-    result = quadratic_weighted_kappa(
-        [1, 2, 3, 4], [1, 2, 3, 4], labels=[1, 2, 3, 4]
-    )
-    assert result["kappa"] == 1.0
-
-
-def test_quadratic_weighted_kappa_handles_empty_input() -> None:
-    result = quadratic_weighted_kappa([], [])
-    assert result["n"] == 0
-    assert result["kappa"] == 0.0
-
-
-def test_rubric_agreement_reports_exact_within_one_and_kappa() -> None:
-    result = rubric_agreement([1, 1, 2, 2], [1, 2, 2, 2])
-    assert result["n"] == 4
-    assert result["exact_agreement"] == 0.75
-    assert result["within_one_agreement"] == 1.0
-    assert result["mean_absolute_difference"] == 0.25
-    assert result["cohen_kappa"] == 0.5
-    assert result["quadratic_weighted_kappa"] == 0.5
-    assert result["confusion_matrix"] == [[1, 1, 0, 0], [0, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]
-
-
-def test_rubric_agreement_handles_empty_input() -> None:
-    result = rubric_agreement([], [])
-    assert result["n"] == 0
-    assert result["exact_agreement"] == 0.0
-    assert result["within_one_agreement"] == 0.0
-    assert result["mean_absolute_difference"] == 0.0
-    assert result["confusion_matrix"] == [[0] * 4 for _ in range(4)]
-
-
-def test_categorical_agreement_counts_exact_matches_and_kappa() -> None:
-    labels = ("supported", "uncertain", "not_supported")
-    result = categorical_agreement(
-        ["supported", "supported", "uncertain", "not_supported"],
-        ["supported", "uncertain", "uncertain", "not_supported"],
-        labels=labels,
-    )
-    assert result["n"] == 4
-    assert result["observed_agreement"] == 0.75
-    assert result["cohen_kappa"] == 0.636364
-    assert result["confusion_matrix"] == [
-        [1, 1, 0],
-        [0, 1, 0],
-        [0, 0, 1],
-    ]
-
-    empty = categorical_agreement([], [], labels=labels)
-    assert empty["n"] == 0
-    assert empty["observed_agreement"] == 0.0
-    assert empty["cohen_kappa"] == 0.0

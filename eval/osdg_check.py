@@ -38,8 +38,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from prism17.config import get, load_config  # noqa: E402
-from prism17.evaluation import (  # noqa: E402
+from prism17.config import get, load_config
+from prism17.evaluation import (
     append_jsonl,
     build_provenance,
     default_thresholds,
@@ -47,12 +47,12 @@ from prism17.evaluation import (  # noqa: E402
     select_threshold,
     threshold_grid,
 )
-from prism17.judge import (  # noqa: E402
+from prism17.judge import (
     RELEVANCE_PROMPT_VERSION,
     JudgeUnavailableError,
     RelevanceJudge,
 )
-from prism17.retrieve import rank_targets_for_texts  # noqa: E402
+from prism17.retrieve import rank_targets_for_texts
 
 LOGGER = logging.getLogger("osdg_check")
 

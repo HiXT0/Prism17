@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from .config import get, load_config, resolve_path
+from .config import display_path, get, load_config, resolve_path
 from .judge import (
     JudgeUnavailableError,
     OllamaJudge,
@@ -37,7 +37,7 @@ from .models import (
 from .parse import ParsedDocument, parse_pdf, summarise
 from .retrieve import retrieve_candidates
 from .rubric import grade_findings
-from .semantic import apply_semantic_support
+from .semantic import verify_semantics
 from .verify import verify_findings
 
 LOGGER = logging.getLogger(__name__)
@@ -91,6 +91,19 @@ class PipelineResult:
             "needs_review": len(self.needs_review),
             "not_relevant": len(self.not_relevant),
             "level_counts": level_counts,
+            "semantic_counts": {
+                state: sum(
+                    1
+                    for finding in self.findings
+                    if finding.semantic_support == state
+                )
+                for state in (
+                    "supported",
+                    "uncertain",
+                    "not_supported",
+                    "not_checked",
+                )
+            },
             "elapsed_seconds": round(self.elapsed_seconds, 3),
         }
 
@@ -98,7 +111,7 @@ class PipelineResult:
         return {
             "schema_version": "0.2",
             "document": {
-                "pdf_path": self.document.pdf_path,
+                "pdf_path": display_path(self.document.pdf_path, self.config),
                 "title": self.document.title,
                 "page_count": self.document.page_count,
                 "sha256": self.document.metadata.get("sha256"),
@@ -109,11 +122,11 @@ class PipelineResult:
                     self.config, "retrieval", "embedding_model", default=None
                 ),
                 "focus_sdgs": get(self.config, "report", "focus_sdgs", default=None),
+                "semantic_enabled": get(
+                    self.config, "verification", "semantic_enabled", default=False
+                ),
                 "semantic_method": get(
                     self.config, "verification", "semantic_method", default=None
-                ),
-                "semantic_enabled": bool(
-                    get(self.config, "verification", "semantic_enabled", default=False)
                 ),
             },
             "stats": self.stats(),
@@ -163,7 +176,8 @@ def run_pipeline(
     max_pages: int | None = None,
     extract_tables_enabled: bool | None = None,
     fuzzy_threshold: float | None = None,
-    semantic_check: bool | None = None,
+    semantic: bool | None = None,
+    semantic_method: str | None = None,
     judge: OllamaJudge | None = None,
     progress_callback: Callable[[int, int, JudgedFinding], None] | None = None,
 ) -> PipelineResult:
@@ -226,22 +240,12 @@ def run_pipeline(
         findings = [
             _reverify(finding, document, fuzzy_threshold) for finding in findings
         ]
-
-    semantic_enabled = (
-        bool(get(cfg, "verification", "semantic_enabled", default=False))
-        if semantic_check is None
-        else bool(semantic_check)
+    findings = verify_semantics(
+        findings,
+        cfg,
+        enabled=semantic,
+        method=semantic_method,
     )
-    cfg = {
-        **cfg,
-        "verification": {
-            **(get(cfg, "verification", default={}) or {}),
-            "semantic_enabled": semantic_enabled,
-        },
-    }
-    if semantic_enabled and findings:
-        findings = apply_semantic_support(findings, cfg)
-
     findings = grade_findings(findings, cfg)
 
     elapsed = time.perf_counter() - started
@@ -303,6 +307,23 @@ def print_report(result: PipelineResult, *, scored_only: bool = False) -> None:
             for level, count in stats["level_counts"].items()
         )
     )
+    semantic_counts = stats.get("semantic_counts") or {}
+    if any(
+        semantic_counts.get(state)
+        for state in ("supported", "uncertain", "not_supported")
+    ):
+        print(
+            "Semantic support: "
+            + ", ".join(
+                f"{state}={semantic_counts.get(state, 0)}"
+                for state in (
+                    "supported",
+                    "uncertain",
+                    "not_supported",
+                    "not_checked",
+                )
+            )
+        )
 
     scored = result.scored
     if scored:
@@ -397,15 +418,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Quote fuzzy-match threshold (default: 95)",
     )
     parser.add_argument(
-        "--semantic",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "Enable Stage 2 semantic-support verification (default: config "
-            "verification.semantic_enabled). Use --no-semantic to skip it."
-        ),
-    )
-    parser.add_argument(
         "--max-candidates",
         type=int,
         default=None,
@@ -413,6 +425,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--max-pages", type=int, default=None, help="Parse only the first N pages"
+    )
+    semantic_group = parser.add_mutually_exclusive_group()
+    semantic_group.add_argument(
+        "--semantic",
+        action="store_true",
+        help="Enable Stage 2 semantic support verification",
+    )
+    semantic_group.add_argument(
+        "--no-semantic",
+        action="store_true",
+        help="Disable Stage 2 semantic support verification",
+    )
+    parser.add_argument(
+        "--semantic-method",
+        choices=("nli", "llm"),
+        default=None,
+        help="Stage 2 method: local NLI cross-encoder or Ollama",
     )
     parser.add_argument(
         "--no-tables", action="store_true", help="Skip pdfplumber table extraction"
@@ -446,7 +475,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_pages=args.max_pages,
             extract_tables_enabled=not args.no_tables,
             fuzzy_threshold=args.fuzzy_threshold,
-            semantic_check=args.semantic,
+            semantic=(
+                True
+                if args.semantic
+                else (False if args.no_semantic else None)
+            ),
+            semantic_method=args.semantic_method,
             progress_callback=_progress_printer(),
         )
     except JudgeUnavailableError as exc:

@@ -17,6 +17,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .config import display_path
+
 
 # ---------------------------------------------------------------------------
 # Provenance
@@ -41,7 +43,7 @@ def file_info(path: str | Path) -> dict[str, Any]:
     """Return size and checksums for a file used by an evaluation run."""
     resolved = Path(path)
     return {
-        "path": str(resolved),
+        "path": display_path(resolved),
         "name": resolved.name,
         "bytes": resolved.stat().st_size,
         "sha256": file_digest(resolved, "sha256"),
@@ -241,231 +243,6 @@ def macro_f1_over_groups(
 
 
 # ---------------------------------------------------------------------------
-# Agreement metrics
-# ---------------------------------------------------------------------------
-
-
-def _validate_ratings(
-    first: Sequence[Any], second: Sequence[Any]
-) -> None:
-    if len(first) != len(second):
-        raise ValueError("rating sequences must have the same length")
-
-
-def _rating_labels(
-    first: Sequence[Any], second: Sequence[Any], labels: Sequence[Any] | None
-) -> list[Any]:
-    if labels is not None:
-        return list(labels)
-    return sorted(set(first) | set(second))
-
-
-def _kappa_from_agreement(observed: float, expected: float) -> float:
-    if expected >= 1.0:
-        # Perfect expected agreement means the ratings carry no information.
-        # Matching that agreement is conventionally reported as 1.0.
-        return 1.0 if observed >= 1.0 else 0.0
-    return (observed - expected) / (1.0 - expected)
-
-
-def _confusion_matrix(
-    first: Sequence[Any],
-    second: Sequence[Any],
-    labels: Sequence[Any],
-) -> list[list[int]]:
-    index = {label: position for position, label in enumerate(labels)}
-    matrix = [[0 for _ in labels] for _ in labels]
-    for left, right in zip(first, second):
-        if left not in index or right not in index:
-            continue
-        matrix[index[left]][index[right]] += 1
-    return matrix
-
-
-def cohen_kappa(
-    first: Sequence[Any],
-    second: Sequence[Any],
-    *,
-    labels: Sequence[Any] | None = None,
-) -> dict[str, Any]:
-    """Return unweighted Cohen's kappa for two rating sequences.
-
-    ``labels`` fixes the rating scale. When omitted, the sorted union of the
-    observed ratings is used. Empty input and a degenerate expected agreement
-    return a kappa of 0.0 rather than dividing by zero.
-    """
-    _validate_ratings(first, second)
-    scale = _rating_labels(first, second, labels)
-    total = len(first)
-    if total == 0 or not scale:
-        return {
-            "n": 0,
-            "labels": scale,
-            "observed_agreement": 0.0,
-            "expected_agreement": 0.0,
-            "kappa": 0.0,
-        }
-
-    matrix = _confusion_matrix(first, second, scale)
-    observed = sum(matrix[index][index] for index in range(len(scale))) / total
-    first_totals = [sum(row) for row in matrix]
-    second_totals = [
-        sum(matrix[row][column] for row in range(len(scale)))
-        for column in range(len(scale))
-    ]
-    expected = sum(
-        first_totals[index] * second_totals[index]
-        for index in range(len(scale))
-    ) / (total * total)
-
-    return {
-        "n": total,
-        "labels": scale,
-        "observed_agreement": round(observed, 6),
-        "expected_agreement": round(expected, 6),
-        "kappa": round(_kappa_from_agreement(observed, expected), 6),
-    }
-
-
-def quadratic_weighted_kappa(
-    first: Sequence[Any],
-    second: Sequence[Any],
-    *,
-    labels: Sequence[Any] | None = None,
-) -> dict[str, Any]:
-    """Return quadratic weighted kappa for ordered ratings.
-
-    The labels are treated as an ordered scale. A one-level difference is
-    penalised less than a two-level difference, which suits rubric levels better
-    than unweighted kappa.
-    """
-    _validate_ratings(first, second)
-    scale = _rating_labels(first, second, labels)
-    total = len(first)
-    if total == 0 or len(scale) < 2:
-        return {
-            "n": total,
-            "labels": scale,
-            "observed_agreement": 0.0,
-            "expected_agreement": 0.0,
-            "kappa": 0.0,
-        }
-
-    matrix = _confusion_matrix(first, second, scale)
-    size = len(scale)
-    denominator_scale = float((size - 1) ** 2)
-    weights = [
-        [
-            ((left - right) ** 2) / denominator_scale
-            for right in range(size)
-        ]
-        for left in range(size)
-    ]
-
-    first_totals = [sum(row) / total for row in matrix]
-    second_totals = [
-        sum(matrix[row][column] for row in range(size)) / total
-        for column in range(size)
-    ]
-    observed_disagreement = sum(
-        weights[left][right] * matrix[left][right] / total
-        for left in range(size)
-        for right in range(size)
-    )
-    expected_disagreement = sum(
-        weights[left][right] * first_totals[left] * second_totals[right]
-        for left in range(size)
-        for right in range(size)
-    )
-    kappa = (
-        1.0 - observed_disagreement / expected_disagreement
-        if expected_disagreement > 0
-        else (1.0 if observed_disagreement == 0 else 0.0)
-    )
-
-    return {
-        "n": total,
-        "labels": scale,
-        "observed_agreement": round(1.0 - observed_disagreement, 6),
-        "expected_agreement": round(1.0 - expected_disagreement, 6),
-        "kappa": round(kappa, 6),
-    }
-
-
-def rubric_agreement(
-    reviewer_levels: Sequence[Any],
-    model_levels: Sequence[Any],
-    *,
-    labels: Sequence[Any] = (1, 2, 3, 4),
-) -> dict[str, Any]:
-    """Summarise agreement between reviewer and model rubric levels.
-
-    Returns exact agreement, agreement within one level, mean absolute
-    difference, unweighted and quadratic weighted kappa, and the confusion
-    matrix (rows are the first sequence, columns the second).
-    """
-    _validate_ratings(reviewer_levels, model_levels)
-    total = len(reviewer_levels)
-    scale = list(labels)
-    matrix = _confusion_matrix(reviewer_levels, model_levels, scale)
-
-    if total == 0:
-        exact = within_one = mean_difference = 0.0
-    else:
-        differences = [
-            abs(float(left) - float(right))
-            for left, right in zip(reviewer_levels, model_levels)
-        ]
-        exact = sum(1 for value in differences if value == 0) / total
-        within_one = sum(1 for value in differences if value <= 1) / total
-        mean_difference = sum(differences) / total
-
-    return {
-        "n": total,
-        "labels": scale,
-        "exact_agreement": round(exact, 6),
-        "within_one_agreement": round(within_one, 6),
-        "mean_absolute_difference": round(mean_difference, 6),
-        "cohen_kappa": cohen_kappa(
-            reviewer_levels, model_levels, labels=scale
-        )["kappa"],
-        "quadratic_weighted_kappa": quadratic_weighted_kappa(
-            reviewer_levels, model_levels, labels=scale
-        )["kappa"],
-        "confusion_matrix": matrix,
-    }
-
-
-def categorical_agreement(
-    first: Sequence[Any],
-    second: Sequence[Any],
-    *,
-    labels: Sequence[Any],
-) -> dict[str, Any]:
-    """Summarise agreement on an unordered categorical scale.
-
-    Used for semantic-support labels such as ``supported``, ``uncertain``,
-    and ``not_supported``. Rows are the first sequence and columns the second.
-    """
-    _validate_ratings(first, second)
-    scale = list(labels)
-    total = len(first)
-    matrix = _confusion_matrix(first, second, scale)
-    agreed = (
-        sum(matrix[index][index] for index in range(len(scale)))
-        if total
-        else 0
-    )
-    return {
-        "n": total,
-        "labels": scale,
-        "observed_agreement": round(agreed / total, 6) if total else 0.0,
-        "cohen_kappa": cohen_kappa(first, second, labels=scale)["kappa"],
-        "confusion_matrix": matrix,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Threshold evaluation
 # ---------------------------------------------------------------------------
 
@@ -641,3 +418,220 @@ def metrics_at(
         if abs(float(entry["threshold"]) - float(threshold)) < 1e-9:
             return entry
     return None
+
+
+# ---------------------------------------------------------------------------
+# Agreement and classification diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _ordered_labels(values: Iterable[Any], labels: Sequence[Any] | None) -> list[Any]:
+    if labels is not None:
+        return list(labels)
+    unique = {value for value in values if value is not None}
+    try:
+        return sorted(unique, key=lambda value: float(value))
+    except (TypeError, ValueError):
+        return sorted(unique, key=str)
+
+
+def confusion_matrix(
+    y_true: Sequence[Any],
+    y_pred: Sequence[Any],
+    labels: Sequence[Any] | None = None,
+) -> dict[str, Any]:
+    """Return a labelled confusion matrix (rows: true, columns: predicted)."""
+    if len(y_true) != len(y_pred):
+        raise ValueError("y_true and y_pred must have the same length")
+
+    ordered = _ordered_labels([*y_true, *y_pred], labels)
+    index = {label: position for position, label in enumerate(ordered)}
+    matrix = [[0 for _ in ordered] for _ in ordered]
+    skipped = 0
+    for truth, prediction in zip(y_true, y_pred):
+        if truth not in index or prediction not in index:
+            skipped += 1
+            continue
+        matrix[index[truth]][index[prediction]] += 1
+
+    return {
+        "labels": ordered,
+        "matrix": matrix,
+        "skipped": skipped,
+    }
+
+
+def cohen_kappa(
+    y_true: Sequence[Any],
+    y_pred: Sequence[Any],
+    labels: Sequence[Any] | None = None,
+) -> float | None:
+    """Return Cohen's kappa, or ``None`` when there is nothing to compare."""
+    if len(y_true) != len(y_pred):
+        raise ValueError("y_true and y_pred must have the same length")
+    if not y_true:
+        return None
+
+    ordered = _ordered_labels([*y_true, *y_pred], labels)
+    index = {label: position for position, label in enumerate(ordered)}
+    matrix = [[0 for _ in ordered] for _ in ordered]
+    for truth, prediction in zip(y_true, y_pred):
+        if truth in index and prediction in index:
+            matrix[index[truth]][index[prediction]] += 1
+
+    total = sum(sum(row) for row in matrix)
+    if total == 0:
+        return None
+    observed = sum(matrix[i][i] for i in range(len(ordered))) / total
+    expected = 0.0
+    for i in range(len(ordered)):
+        row_total = sum(matrix[i])
+        column_total = sum(matrix[row][i] for row in range(len(ordered)))
+        expected += (row_total / total) * (column_total / total)
+    if expected >= 1.0:
+        return 1.0 if observed >= 1.0 else 0.0
+    return round((observed - expected) / (1.0 - expected), 6)
+
+
+def quadratic_weighted_kappa(
+    y_true: Sequence[Any],
+    y_pred: Sequence[Any],
+    *,
+    labels: Sequence[int] = (1, 2, 3, 4),
+) -> float | None:
+    """Return quadratic weighted kappa for ordered rubric levels."""
+    if len(y_true) != len(y_pred):
+        raise ValueError("y_true and y_pred must have the same length")
+    if not y_true:
+        return None
+
+    positions = {value: index for index, value in enumerate(labels)}
+    size = len(labels)
+    observed = [[0 for _ in range(size)] for _ in range(size)]
+    for truth, prediction in zip(y_true, y_pred):
+        if truth not in positions or prediction not in positions:
+            continue
+        observed[positions[truth]][positions[prediction]] += 1
+
+    total = sum(sum(row) for row in observed)
+    if total == 0:
+        return None
+    row_totals = [sum(row) for row in observed]
+    column_totals = [
+        sum(observed[row][column] for row in range(size))
+        for column in range(size)
+    ]
+    expected = [
+        [
+            (row_totals[row] * column_totals[column]) / total
+            for column in range(size)
+        ]
+        for row in range(size)
+    ]
+
+    numerator = 0.0
+    denominator = 0.0
+    for row in range(size):
+        for column in range(size):
+            weight = ((row - column) ** 2) / ((size - 1) ** 2 or 1)
+            numerator += weight * observed[row][column]
+            denominator += weight * expected[row][column]
+    if denominator == 0:
+        return 1.0 if numerator == 0 else 0.0
+    return round(1.0 - (numerator / denominator), 6)
+
+
+def mean_absolute_difference(
+    y_true: Sequence[float],
+    y_pred: Sequence[float],
+) -> float | None:
+    """Return the mean absolute difference, or ``None`` for no pairs."""
+    if len(y_true) != len(y_pred):
+        raise ValueError("y_true and y_pred must have the same length")
+    if not y_true:
+        return None
+    total = sum(abs(float(a) - float(b)) for a, b in zip(y_true, y_pred))
+    return round(total / len(y_true), 6)
+
+
+def categorical_agreement(
+    reviewer: Sequence[Any],
+    model: Sequence[Any],
+    labels: Sequence[Any] | None = None,
+) -> dict[str, Any]:
+    """Compare two categorical label sequences on their paired entries.
+
+    ``reviewer`` and ``model`` must be aligned. ``None`` marks a missing value
+    and is skipped. The result includes the pair count, exact agreement, Cohen's
+    kappa, and a confusion matrix.
+    """
+    if len(reviewer) != len(model):
+        raise ValueError("reviewer and model must have the same length")
+
+    pairs = [
+        (left, right)
+        for left, right in zip(reviewer, model)
+        if left is not None and right is not None
+    ]
+    if not pairs:
+        ordered = _ordered_labels([], labels)
+        return {
+            "n": 0,
+            "agreement": None,
+            "kappa": None,
+            "confusion": {
+                "labels": ordered,
+                "matrix": [[0 for _ in ordered] for _ in ordered],
+                "skipped": 0,
+            },
+        }
+
+    left = [pair[0] for pair in pairs]
+    right = [pair[1] for pair in pairs]
+    correct = sum(1 for a, b in pairs if a == b)
+    return {
+        "n": len(pairs),
+        "agreement": round(correct / len(pairs), 6),
+        "kappa": cohen_kappa(left, right, labels),
+        "confusion": confusion_matrix(left, right, labels),
+    }
+
+
+def rubric_agreement(
+    reviewer_levels: Sequence[int],
+    model_levels: Sequence[int],
+) -> dict[str, Any]:
+    """Compare reviewer and model rubric levels on paired entries."""
+    pairs = [
+        (int(reviewer), int(model))
+        for reviewer, model in zip(reviewer_levels, model_levels)
+        if reviewer is not None and model is not None
+    ]
+    if not pairs:
+        return {
+            "n": 0,
+            "exact_agreement": None,
+            "within_one": None,
+            "mean_absolute_difference": None,
+            "quadratic_weighted_kappa": None,
+            "confusion": confusion_matrix([], [], [1, 2, 3, 4]),
+        }
+
+    reviewer_values = [pair[0] for pair in pairs]
+    model_values = [pair[1] for pair in pairs]
+    exact = sum(1 for a, b in pairs if a == b) / len(pairs)
+    within_one = sum(1 for a, b in pairs if abs(a - b) <= 1) / len(pairs)
+    return {
+        "n": len(pairs),
+        "exact_agreement": round(exact, 6),
+        "within_one": round(within_one, 6),
+        "mean_absolute_difference": mean_absolute_difference(
+            reviewer_values, model_values
+        ),
+        "quadratic_weighted_kappa": quadratic_weighted_kappa(
+            reviewer_values, model_values
+        ),
+        "confusion": confusion_matrix(
+            reviewer_values, model_values, [1, 2, 3, 4]
+        ),
+    }

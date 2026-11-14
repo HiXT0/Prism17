@@ -36,6 +36,7 @@ PROMPT_DIR = PROJECT_ROOT / "prompts"
 # tooling. It is part of the cache key, so changing the prompt invalidates old
 # judgements instead of silently reusing them.
 RELEVANCE_PROMPT_VERSION = "relevance-v1"
+SUPPORT_PROMPT_VERSION = "support-v1"
 
 RELEVANCE_SYSTEM_PROMPT = (
     "You are a careful annotator for the UN Sustainable Development Goals. "
@@ -44,6 +45,16 @@ RELEVANCE_SYSTEM_PROMPT = (
     "the target has been achieved. Return one JSON object with exactly these "
     'keys: "relevant" (boolean), "confidence" (number from 0 to 1), and '
     '"reason" (a short phrase). Do not add markdown or any other text.'
+)
+
+SUPPORT_SYSTEM_PROMPT = (
+    "You are a careful evidence checker. Decide whether the QUOTE supports the "
+    "CLAIM. A quote supports a claim when the claim is a faithful restatement "
+    "of information stated in the quote. Do not use outside knowledge and do "
+    "not assess real-world performance. Return one JSON object with exactly "
+    'these keys: "supported" ("yes", "no", or "unclear"), "confidence" '
+    "(number from 0 to 1), and \"reason\" (a short phrase). Do not add markdown "
+    "or any other text."
 )
 
 
@@ -135,6 +146,54 @@ def validate_relevance_data(data: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "relevant": relevant,
+        "confidence": round(confidence, 4),
+        "reason": reason,
+    }
+
+
+def build_support_prompt(*, claim: str, quote: str) -> str:
+    """Build the claim/quote support prompt used by Stage 2 (LLM method)."""
+    return (
+        f"CLAIM:\n{claim}\n\n"
+        f"QUOTE:\n{quote}\n\n"
+        "Return the JSON object now."
+    )
+
+
+@dataclass
+class SupportJudgement:
+    """Semantic-support result for one claim/quote pair."""
+
+    supported: str
+    confidence: float
+    reason: str
+    status: str
+    raw_response: str = ""
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
+def validate_support_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalise one support JSON object."""
+    supported = str(data.get("supported", "") or "").strip().lower()
+    if supported not in {"yes", "no", "unclear"}:
+        raise JudgeOutputError("supported must be yes, no, or unclear")
+
+    try:
+        confidence = float(data.get("confidence", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise JudgeOutputError("confidence must be a number") from exc
+    confidence = min(1.0, max(0.0, confidence))
+
+    reason = str(data.get("reason", "") or "").strip()
+    if len(reason) > 300:
+        reason = reason[:300].rstrip()
+
+    return {
+        "supported": supported,
         "confidence": round(confidence, 4),
         "reason": reason,
     }
@@ -658,6 +717,137 @@ class RelevanceJudge(_OllamaRuntime):
         )
         return RelevanceJudgement(
             relevant=None,
+            confidence=0.0,
+            reason="",
+            status="error",
+            raw_response=last_raw,
+            error=error,
+        )
+
+
+class SupportJudge(_OllamaRuntime):
+    """Claim/quote support judge for Stage 2 semantic verification."""
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        model: str | None = None,
+        *,
+        client: Any | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> None:
+        super().__init__(config, model, client=client)
+        self.cache_dir = (
+            Path(cache_dir) if cache_dir else self.cache_dir / "support"
+        )
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _cache_path(self, claim: str, quote: str) -> Path:
+        digest = hashlib.sha256(
+            (
+                SUPPORT_PROMPT_VERSION
+                + "\n"
+                + self.model
+                + "\n"
+                + SUPPORT_SYSTEM_PROMPT
+                + "\n"
+                + claim
+                + "\n"
+                + quote
+            ).encode("utf-8")
+        ).hexdigest()
+        return self.cache_dir / f"{digest}.json"
+
+    def judge(self, claim: str, quote: str) -> SupportJudgement:
+        """Return a cached support judgement for one claim/quote pair."""
+        user_prompt = build_support_prompt(claim=claim, quote=quote)
+        cache_path = self._cache_path(claim, quote)
+        if cache_path.exists():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                if cached.get("ok") and isinstance(cached.get("data"), dict):
+                    data = cached["data"]
+                    return SupportJudgement(
+                        supported=str(data.get("supported", "unclear")),
+                        confidence=float(data.get("confidence", 0.0)),
+                        reason=str(data.get("reason", "")),
+                        status="ok",
+                        raw_response=str(cached.get("raw", "")),
+                    )
+                if not cached.get("ok"):
+                    return SupportJudgement(
+                        supported="unclear",
+                        confidence=0.0,
+                        reason="",
+                        status="error",
+                        raw_response=str(cached.get("raw", "")),
+                        error=str(cached.get("error", "cached malformed output")),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "Ignoring unreadable support cache %s: %s", cache_path, exc
+                )
+
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": SUPPORT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        last_raw = ""
+        last_error = "unknown error"
+
+        for attempt in range(self.retries + 1):
+            try:
+                last_raw = self._chat(messages)
+                parsed = parse_json_object(last_raw)
+                data = validate_support_data(parsed)
+                cache_path.write_text(
+                    json.dumps(
+                        {"ok": True, "raw": last_raw, "data": data},
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                return SupportJudgement(
+                    supported=str(data["supported"]),
+                    confidence=float(data["confidence"]),
+                    reason=str(data["reason"]),
+                    status="ok",
+                    raw_response=last_raw,
+                )
+            except (JudgeOutputError, ValueError, TypeError) as exc:
+                last_error = str(exc)
+                LOGGER.warning(
+                    "Support judge output invalid (attempt %s/%s): %s",
+                    attempt + 1,
+                    self.retries + 1,
+                    last_error,
+                )
+                if attempt < self.retries:
+                    messages.extend(
+                        [
+                            {"role": "assistant", "content": last_raw},
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Your previous response was invalid: "
+                                    f"{last_error}. Return only one corrected JSON "
+                                    "object with the keys supported, confidence, "
+                                    "and reason. Do not add markdown."
+                                ),
+                            },
+                        ]
+                    )
+
+        error = f"malformed support output: {last_error}"
+        cache_path.write_text(
+            json.dumps(
+                {"ok": False, "raw": last_raw, "error": error},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return SupportJudgement(
+            supported="unclear",
             confidence=0.0,
             reason="",
             status="error",

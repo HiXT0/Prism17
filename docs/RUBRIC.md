@@ -1,112 +1,76 @@
-# Prism17 rubric
+# Prism17 disclosure rubric
 
-The rubric describes the **strength of a disclosure**, not the strength of the
-company's sustainability performance. It is deterministic: the same five boolean
-dimensions and the same `negated` flag always produce the same level. There is no
-LLM call in `prism17/rubric.py`.
+Prism17 scores **disclosure**, not real-world performance. A Level 4 passage is
+not evidence that a company is sustainable; it is evidence that the report
+states a specific, measurable, time-bound, baseline-anchored action and reports
+progress against it. A Level 1 passage is not evidence of inaction.
 
-## The five dimensions
+The rubric is deterministic. It lives in `prism17/rubric.py` and uses only the
+five boolean dimensions returned by the judge plus an explicit `negated` flag.
+No model call happens during grading.
 
-Every judged claim carries five booleans. They refer to the verified quote.
+## Five dimensions
 
-| Key | Question |
+| Dimension | True when the passage... |
 | --- | --- |
-| `specificity` | Does the quote describe a concrete action, commitment, or result rather than a general statement? |
-| `measurable_indicator` | Is there a number, percentage, intensity, or other measurable indicator? |
-| `deadline` | Is there a target date, reporting year, or time-bound commitment? |
-| `baseline` | Is there a prior-year value, reference point, or baseline for comparison? |
-| `reported_progress` | Is there a reported result or change against a baseline, not only a future intention? |
-
-A dimension is `present` only when the judge finds it in the quote. Absence is a
-**disclosure gap in that quote**, not evidence that the company does nothing.
-The quote may be one passage from a longer report that discloses the missing
-dimension elsewhere.
+| `specificity` | names a concrete action, project, technology, policy, or commitment. A general aspiration is not specific. |
+| `measurable_indicator` | gives a number with a unit or metric, such as `42%`, `1,200 tCO2e`, `15 ML`, or `3,000 employees`. A year alone is not an indicator. |
+| `deadline` | gives a target date or year by which an action or result is to be achieved. The report's own reporting year is not a deadline. |
+| `baseline` | gives an explicit starting value, prior-year value, or benchmark against which change is measured. |
+| `reported_progress` | reports actual results or progress achieved, not only a future plan or commitment. |
 
 ## Level rules
 
-Rules are applied in order. The first match wins.
+Rules are applied in order; the first matching rule wins.
 
-| Level | Rule |
-| --- | --- |
-| 1 | The quote says the action is not applicable, not done, or not measured (`negated` is true). |
-| 1 | `specificity` is false: the statement is relevant but general. |
-| 4 | All five dimensions are present. |
-| 3 | `specificity`, `measurable_indicator`, and `deadline` are present. |
-| 2 | `specificity` is present and at least one of `measurable_indicator`, `deadline`, `baseline`, or `reported_progress` is present. |
-| 1 | `specificity` is present but no measurable, time-bound, baseline, or progress information is present. |
+| Level | Rule | Neutral interpretation |
+| --- | --- | --- |
+| 1 | The passage states the action is not applicable, not done, or not measured (`negated: true`). | Explicit non-disclosure or exclusion. |
+| 1 | `specificity` is false. | Relevant but general disclosure. |
+| 4 | All five dimensions are true. | Specific, measurable, time-bound, baseline-anchored, and reports progress. |
+| 3 | `specificity`, `measurable_indicator`, and `deadline` are true. | Specific and quantified, but baseline or progress evidence is incomplete. |
+| 2 | `specificity` is true and at least one of `measurable_indicator`, `deadline`, `baseline`, or `reported_progress` is true. | Specific but partially evidenced. |
+| 1 | `specificity` is true and no other dimension is true. | Specific action with no measurable, time-bound, baseline, or progress information. |
 
-`negated` is read from the judge's `extracted` object. It covers statements such
-as "not applicable", "not measured", or "we do not report this". Those statements
-can be useful disclosures of a gap, but they are not evidence of action, so they
-receive Level 1.
+Every graded finding also records `disclosure_gaps`: neutral sentences for each
+missing dimension. The report uses these to generate guidance, not accusations.
 
-## Worked examples
-
-These examples are illustrative. Real labels come from the source page.
-
-| Quote | Dimensions | Level | Why |
-| --- | --- | --- | --- |
-| "We care about the environment." | none | 1 | General; no concrete action. |
-| "We are installing 20 MW of solar capacity by 2027." | specific, measurable, deadline | 3 | Concrete action with a number and a date, but no baseline or reported progress. |
-| "We reduced Scope 1 emissions by 42% in FY2024 against a FY2020 baseline of 100,000 tCO2e." | all five | 4 | Specific, measurable, dated, baseline-anchored, and reports a result. |
-| "We plan to reduce water use." | specific only | 1 | No measurable indicator, deadline, baseline, or progress. |
-| "This indicator is not applicable to our operations." | negated | 1 | The company states the action is not applicable. |
-| "We trained 1,200 employees in 2024 as part of our safety programme." | specific, measurable, deadline | 3 | A completed count in a reporting year; no explicit baseline or progress comparison. |
-
-A future commitment can reach Level 4 if it is specific, measurable, time-bound,
-baseline-anchored, and reports progress against that baseline. Level 4 is not a
-claim that the target was achieved.
-
-## Disclosure gaps
-
-For every finding the rubric returns a list of gaps for the missing dimensions:
-
-- "The disclosure is general rather than specific."
-- "No measurable indicator is disclosed."
-- "No target date or deadline is disclosed."
-- "No baseline or prior-year comparison is disclosed."
-- "No reported progress or result is disclosed."
-
-User-facing reports use neutral flag text such as "low specificity" and
-"disclosure gap: no deadline".
-
-## Scoring gate
+## Scoring preconditions
 
 A finding is scored only when all of the following hold:
 
-1. the judge marked it relevant and schema-valid;
-2. the quote was verified on the cited page (Stage 1);
-3. Stage 2 did not return `uncertain` or `not_supported`;
-4. the rubric assigned a level;
-5. no review reason is attached.
+- the judge marked the passage relevant and its output passed schema validation;
+- the supporting quote was verified against the cited source page (Stage 1);
+- Stage 2 semantic support, when enabled, is `supported` or `not_checked`;
+- a rubric level was assigned;
+- no review reason is attached.
 
-Stage 2 `not_checked` does **not** block scoring. That keeps the audit usable on a
-laptop that has not downloaded the optional NLI model.
+A finding that fails any precondition keeps `level: null` and is shown under
+"needs review". It is never counted as scored, and it never contributes to
+coverage, tracking, or comparison metrics.
 
-## Coverage matrix
+## Worked examples
 
-The report's evidence matrix shows the same five dimensions per claim as
-`present`, `absent`, or `n/a` (not assessable). It is a presentation of the
-judged dimensions, not a second scoring system. A claim can be Level 2 while
-still showing several absent dimensions.
+These are illustrative shape examples, not gold annotations.
 
-## Calibration and limitations
+| Passage (abridged) | Dimensions | Level |
+| --- | --- | --- |
+| "We care about the climate." | none | 1 (not specific) |
+| "We installed LED lighting at three plants." | specificity | 1 (specific, nothing else) |
+| "We installed LED lighting at three plants, cutting electricity use by 12%." | specificity, measurable | 2 |
+| "We will cut electricity use by 12% by 2027." | specificity, measurable, deadline | 3 |
+| "We cut electricity use by 12% against a 2021 baseline, and report annual progress toward our 2027 target." | all five dimensions | 4 |
+| "This target is not applicable to our operations." | negated | 1 |
 
-- The dimensions come from the local judge. A prior-year column in a table can be
-  visible in the quote while the judge still marks `baseline` false.
-- The rubric measures the evidence in one quote. It does not search the whole
-  report for a missing dimension.
-- The rubric does not reward the size, ambition, or real-world effect of a
-  target. It rewards specificity and evidence.
-- The rubric is deterministic, but the judge is not. Re-running with another
-  model can change the dimensions and therefore the level.
-- No human gold annotations or measured rubric agreement results are bundled.
-  Use `eval/make_gold_template.py` and `eval/score_benchmark.py` to collect and
-  score them. Do not report agreement numbers before annotations exist.
+## Calibration and change control
 
-## Related files
-
-- `prism17/rubric.py` — implementation; no model calls.
-- `tests/test_rubric.py` — branch coverage for every rule.
-- `data/gold/ANNOTATION_GUIDELINES.md` — how to label reviewer levels.
-- `README.md` — run commands and report behaviour.
+- The rubric has no tunable thresholds. Do not tune it against benchmark or test
+  reports.
+- Changing a rule requires updating `prism17/rubric.py`, this document, and the
+  rubric tests in `tests/test_rubric.py` together.
+- Judge dimension flags can disagree with a human reading. For example, a
+  prior-year column may be visible in a table quote while the judge marks
+  `baseline` false. Read the listed gaps alongside the quote and record any
+  disagreement during annotation.
+- The annotation benchmark measures agreement with human labels. It does not
+  validate the rubric as a measure of real-world performance.

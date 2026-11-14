@@ -56,6 +56,25 @@ def resolve_path(value: str | Path, config: dict[str, Any] | None = None) -> Pat
     return path.resolve()
 
 
+def display_path(
+    value: str | Path, config: dict[str, Any] | None = None
+) -> str:
+    """Return a path safe to save in JSON: relative when inside the project.
+
+    Artifacts must not embed the author's home directory. Paths inside the
+    project are stored relative to its root; paths outside it are reduced to a
+    file name. The original path is still used for reading the file.
+    """
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        return path.as_posix()
+    root = project_root(config).resolve()
+    try:
+        return path.resolve().relative_to(root).as_posix()
+    except ValueError:
+        return path.name
+
+
 def configured_path(
     config: dict[str, Any],
     *keys: str,

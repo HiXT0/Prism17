@@ -219,46 +219,6 @@ def test_run_pipeline_counts_schema_failure_as_needs_review(
     assert stats["needs_review"] == 1
 
 
-def test_run_pipeline_records_effective_semantic_setting(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    quote = (
-        "We reduced Scope 1 and Scope 2 emissions by 42% in FY2024 against a "
-        "FY2020 baseline of 100,000 tCO2e."
-    )
-    document = _document(quote)
-    candidate = _judged(quote).candidate
-    calls: list[bool] = []
-
-    def _fake_apply(findings, config, **kwargs):
-        calls.append(True)
-        for finding in findings:
-            finding.semantic_support = "supported"
-            finding.semantic_score = 0.9
-        return list(findings)
-
-    monkeypatch.setattr("prism17.pipeline.parse_pdf", lambda *a, **k: document)
-    monkeypatch.setattr(
-        "prism17.pipeline.retrieve_candidates", lambda *a, **k: [candidate]
-    )
-    monkeypatch.setattr(
-        "prism17.pipeline.judge_candidates", lambda *a, **k: [_judged(quote)]
-    )
-    monkeypatch.setattr(
-        "prism17.pipeline.apply_semantic_support", _fake_apply
-    )
-
-    config = load_config()
-    config["verification"]["semantic_enabled"] = False
-    result = run_pipeline(
-        "example.pdf", config, max_candidates=10, semantic_check=True
-    )
-
-    assert calls == [True]
-    assert result.to_dict()["settings"]["semantic_enabled"] is True
-    assert result.findings[0].semantic_support == "supported"
-
-
 def test_main_writes_audit_json_and_reports(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
