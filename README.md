@@ -1,9 +1,5 @@
 # Prism17: Evidence-Grounded SDG Disclosure Auditor
 
-**FIRE 2026 | Sustainable Development Through AI (SDAI)**
-Co-located with the FIRE 2026 Conference, Indian Statistical Institute, Kolkata
-Event page: <https://sohampoddar26.github.io/fire26-sdai/session.html>
-
 Prism17 reads a corporate report (BRSR filing, sustainability report or annual
 report) and produces an **SDG Alignment Report**, in the style of a similarity
 report attached to a document. It maps passages to the UN Sustainable Development
@@ -46,8 +42,8 @@ finding to a **verified quote and page number**.
 | **Input** | A report PDF |
 | **Output** | SDG Alignment Report (Markdown and HTML), audit JSON, Streamlit review UI |
 | **Repository** | <https://github.com/HiXT0/Prism17> |
-| **Proposal deck** | *[link to be added]* (up to 20 slides, PPT or PDF) |
-| **Demo video** | *[link to be added]* |
+| **Proposal deck** | link to be added |
+| **Demo video** | <https://drive.google.com/file/d/1UaW81_gHuZNwjUvg__XxzlDgdqkMZRgm/view?usp=sharing> |
 
 **How this project meets the SDAI requirements**
 
@@ -402,6 +398,3 @@ Thanks to the SDAI session organizers, the UN Statistics Division for the SDG
 framework, the OSDG project for its community dataset, and the authors of Ollama,
 PyMuPDF, pdfplumber, sentence-transformers, FAISS, RapidFuzz, Streamlit, Jinja2
 and pandas. Model weights are used under their respective licences.
-
-*Pre-existing work: [state what existed before this event, if anything, and what
-was built for it].*
